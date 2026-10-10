@@ -189,6 +189,18 @@
   .ibtn:hover { background: #3a3a46; }
   .ibtn.del:hover { background: #5c2f2f; border-color: #8a4444; color: #ffd9d9; }
   .ibtn.rst:hover { background: #2f4a3a; border-color: #447a55; color: #d9ffe4; }
+  /* ⭐ 增加议题弹窗 */
+  .abody { padding: 4px 20px 8px; overflow-y: auto; }
+  .abody label { display: block; font-size: 12.5px; color: #9aa9c0; margin: 12px 0 5px; }
+  .abody input, .abody textarea {
+    width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #34343f;
+    background: #22222b; color: #eaeaf2; font-size: 14px; outline: none;
+    font-family: inherit; resize: vertical;
+  }
+  .abody input:focus, .abody textarea:focus { border-color: #4a6fa5; box-shadow: 0 0 0 2px rgba(74,111,165,.22); }
+  .abody textarea { min-height: 150px; line-height: 1.7; }
+  .abody .tip { font-size: 11.5px; color: #6c6c80; margin-top: 5px; }
+  .abody .errtxt { color: #ffb0b0; font-size: 12px; margin-top: 8px; min-height: 16px; }
 
   /* ⭐ 最终会议纪要（阿鱼整理的那份大总结） */
   .summary {
@@ -248,6 +260,32 @@
       <span class="hint" id="mHint"></span>
       <button class="ghost" id="mClose">先不开始</button>
       <button id="mStart" disabled>开始讨论</button>
+    </div>
+  </div>
+</div>
+
+<!-- ⭐ 增加议题（阿包定的字段：题目 → 选题理由 → 由谁提供）-->
+<div id="addModal" class="modal hidden">
+  <div class="mbox" style="max-width:600px">
+    <div class="mhead">
+      <div class="mtitle">➕ 增加议题</div>
+      <div class="msub">加完会出现在议题一览的最后，位置可以拖动调整</div>
+    </div>
+    <div class="abody">
+      <label for="addTitle">议题题目</label>
+      <input id="addTitle" placeholder="一句话说清要讨论什么" autocomplete="off" maxlength="120">
+      <label for="addReason">选题理由</label>
+      <textarea id="addReason" placeholder="为什么想聊这个？希望听到什么？有什么背景可以交代？"></textarea>
+      <label for="addAuthor">由谁提供</label>
+      <input id="addAuthor" placeholder="你自己的名字，或某个 AI 的名字" autocomplete="off" maxlength="24">
+      <div class="tip">留空也行 —— 议题一览里会显示「（未标注）」</div>
+      <div class="errtxt" id="addErr"></div>
+    </div>
+    <div class="mfoot">
+      <button class="ghost" id="liveAsk">🎤 现场提问</button>
+      <span class="hint"></span>
+      <button class="ghost" id="addCancel">取消</button>
+      <button id="addSave">保存</button>
     </div>
   </div>
 </div>
@@ -353,7 +391,8 @@ function loadTopics() {
       const el = document.createElement("div");
       el.className = "titem" + (t.index === d.current ? " sel" : "");
       el.dataset.index = t.index;
-      el.innerHTML = `<div class="ti">${t.index + 1}</div><div><div class="tt">${esc(t.title)}</div></div>`;
+      const byline = t.author ? `<div class="tb">由 ${esc(t.author)} 提出</div>` : "";
+      el.innerHTML = `<div class="ti">${t.index + 1}</div><div><div class="tt">${esc(t.title)}</div>${byline}</div>`;
       el.onclick = () => {
         topicList.querySelectorAll(".titem").forEach(x => x.classList.remove("sel"));
         el.classList.add("sel");
@@ -437,6 +476,9 @@ function showLib() {
       } else {
         meta = `<span class="todo">（还没讨论过）</span>`;
       }
+      // ⭐ 由谁提供（阿包要的，显示在战绩前面）
+      const by = tp.author ? `由 <span class="who">${esc(tp.author)}</span> 提供 · ` : `<span class="todo">（未标注提出者）</span> · `;
+      meta = by + meta;
       el.innerHTML =
         `<div class="hrow"><div class="hd"><span class="grip">⠿</span><span class="num">${tp.index + 1}.</span>` +
         `<span class="ht">${esc(tp.title)}</span></div>` +
@@ -501,10 +543,48 @@ document.getElementById("cfYes").onclick = async () => {
   if (act) await act();
 };
 
-/* ⭐ 增加议题：按钮先摆上，弹窗等阿包定 */
-document.getElementById("libAdd").onclick = () => {
-  libSub.textContent = "➕ 「增加议题」的弹窗还没做 —— 阿包说他要先想好长什么样 😌";
+/* ⭐ 增加议题弹窗 */
+const addModal = document.getElementById("addModal");
+function showAdd() {
+  document.getElementById("addTitle").value = "";
+  document.getElementById("addReason").value = "";
+  document.getElementById("addAuthor").value = "";
+  document.getElementById("addErr").textContent = "";
+  addModal.classList.remove("hidden");
+  setTimeout(() => document.getElementById("addTitle").focus(), 50);
+}
+async function saveAdd() {
+  const title = document.getElementById("addTitle").value.trim();
+  const reason = document.getElementById("addReason").value.trim();
+  const author = document.getElementById("addAuthor").value.trim();
+  const err = document.getElementById("addErr");
+  if (!title) { err.textContent = "⚠️ 议题题目不能空着"; return; }
+  err.textContent = "";
+  const r = await fetch("/topics/add", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, reason, author })
+  });
+  const j = await r.json();
+  if (j.ok) {
+    addModal.classList.add("hidden");
+    showLib();                      // ⭐ 回到议题一览，能看到新加的那条
+  } else {
+    err.textContent = "⚠️ 保存失败（题目重复了？换个说法试试）";
+  }
+}
+document.getElementById("addCancel").onclick = () => addModal.classList.add("hidden");
+document.getElementById("addSave").onclick = saveAdd;
+document.getElementById("addTitle").addEventListener("keydown", e => {
+  if (e.key === "Enter") document.getElementById("addReason").focus();   // ⭐ 题目只有一行，回车跳下一栏
+});
+// ⭐ 现场提问：按钮先摆着，具体交互等阿包说
+document.getElementById("liveAsk").onclick = () => {
+  document.getElementById("addErr").textContent =
+    "🎤 「现场提问」还没做 —— 阿包说他要再详细讲讲这个按钮 😌";
 };
+
+/* ⭐ 议题一览的「增加议题」入口 */
+document.getElementById("libAdd").onclick = showAdd;
 
 mStart.onclick = async () => {
   if (!canStart || pickedTopic === null) return;

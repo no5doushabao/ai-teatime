@@ -150,7 +150,7 @@ _chosen_topic_index = 0          # ⭐ 阿包在界面上选的议题（0 = 第�
 def parse_topics() -> list:
     """从 `topics.md` 读议题 —— ⭐ 这是议题的唯一来源（阿包手动维护的文件）。
 
-    格式：一行 `## 标题`，下面跟正文（可多行）。
+    格式：一行 `## 标题`，下面跟正文（可多行，正文里含"由谁提供"）。
     ⚠️ 这文件以后是阿包手动编辑的，解析必须宽松：认不出的内容忽略，绝不抛异常。
     """
     path = ROOT / "topics.md"
@@ -169,7 +169,46 @@ def parse_topics() -> list:
         out.append(cur)
     for t in out:
         t["body"] = t["body"].strip()
+        t["author"] = parse_author(t["body"])
     return out
+
+
+def parse_author(body: str) -> str:
+    """⭐ 从议题正文里认出「由谁提供」。
+
+    兼容两种写法（程序生成的新格式 + 阿包手写的旧格式）：
+      · `> **由谁提供**：GPT`
+      · `（由 GPT 提出）`
+    认不出就返回空串 —— 议题一览里显示"未标注"。
+    """
+    for pat in (r"由谁提供\s*\**\s*[:：]\s*\**([^\n*（(]{1,24})",
+                r"由\s*\**((?!谁)[^\n*（(]{1,24}?)\**\s*(?:提出|提供)"):
+        m = re.search(pat, body or "")
+        if m:
+            who = m.group(1).strip().strip("*：: ").strip()
+            if who:
+                return who
+    return ""
+
+
+def add_topic(title: str, reason: str, author: str) -> bool:
+    """⭐ 新增议题（议题一览的「➕ 增加议题」弹窗）。
+
+    追加到末尾（位置可以之后拖动调整）。同名的直接拒绝，免得议题一览里出现两个一样的。
+    """
+    title = (title or "").strip()
+    if not title:
+        return False
+    items = parse_topics()
+    if any(t["title"].strip() == title for t in items):
+        return False
+    parts = []
+    if (author or "").strip():
+        parts.append(f"> **由谁提供**：{author.strip()}")
+    if (reason or "").strip():
+        parts.append(reason.strip())
+    items.append({"title": title, "body": "\n\n".join(parts)})
+    return write_topics(items)
 
 
 # ── 讨论历史（⭐ 议题库要显示"讨论过几轮、谁参与的"）──────────
@@ -956,11 +995,13 @@ class Handler(SimpleHTTPRequestHandler):
                     if q in _clients:
                         _clients.remove(q)
             return
-        if self.path == "/topics":                 # ⭐ 给界面弹议题选择框用
+        if self.path == "/topics":                 # ⭐ 给界面弹议题选择框 / 议题一览用
             s = load_settings()
             ready_n = sum(1 for g in load_roster() if g.get("ready"))
+            md = parse_topics()
             body = json.dumps({
-                "topics": [{"index": i, "title": t} for i, t in enumerate(s["topics"])],
+                "topics": [{"index": i, "title": t["title"], "author": t.get("author", "")}
+                           for i, t in enumerate(md)],
                 "current": s["topic_index"],
                 "ready": ready_n,
                 "min_guests": s["min_guests"],
@@ -997,6 +1038,25 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         global _chosen_topic_index
+        if self.path == "/topics/add":             # ⭐ 议题一览：新增议题
+            n = int(self.headers.get("Content-Length", 0))
+            ok = False
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+                ok = add_topic(payload.get("title") or "",
+                               payload.get("reason") or "",
+                               payload.get("author") or "")
+                if ok:
+                    say("system", f"➕ 议题库新增：{str(payload.get('title') or '')[:40]}", "system")
+            except Exception:
+                ok = False
+            body = json.dumps({"ok": ok}, ensure_ascii=False).encode("utf-8")
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/topics/delete":          # ⭐ 议题一览：删除某个议题
             n = int(self.headers.get("Content-Length", 0))
             ok = False

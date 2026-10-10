@@ -61,7 +61,27 @@ _history = []          # 全部消息（也用于落盘）
 _boss_inbox = []       # 阿包插的话，等下一轮统一喂给嘉宾
 _round_no = 0
 _seq = 0               # ⭐ 消息序号：SSE 断线重连会补发全部历史，前端靠它去重
-_log_path = ROOT / "chat-log.md"
+_log_path = None       # ⭐ 由 main() 决定：**每场讨论一个文件**（以前写死 chat-log.md，
+#                        而且启动时 write_text 覆盖 —— 重启一次就把上一场的记录冲掉了，
+#                        2026-10-10 那场"记忆清空"的完整记录就是这么丢的 😢）
+
+
+def init_log(topic: str) -> Path:
+    """开一场新的日志文件（logs/日期-时间-议题.md）。返回路径，同时设好全局 _log_path。"""
+    global _log_path
+    d = ROOT / "logs"
+    d.mkdir(exist_ok=True)
+    safe = re.sub(r'[\\/:*?"<>|\s]+', "-", (topic or "debate")).strip("-")[:26] or "debate"
+    base = d / f"{datetime.now():%Y%m%d-%H%M%S}-{safe}"
+    _log_path = base.with_suffix(".md")
+    i = 2
+    while _log_path.exists():          # ⭐ 绝不允许覆盖：同名就加 -2、-3…
+        _log_path = base.with_name(f"{base.name}-{i}").with_suffix(".md")
+        i += 1
+    _log_path.write_text(
+        f"# 讨论记录\n\n- 开始：{datetime.now():%Y-%m-%d %H:%M}\n- 议题：{topic}\n\n",
+        encoding="utf-8")
+    return _log_path
 
 
 def now_hhmm() -> str:
@@ -228,6 +248,8 @@ def broadcast(msg: dict) -> None:
         for q in dead:
             _clients.remove(q)
     try:                                     # 顺手落盘，散场后能回看
+        if _log_path is None:
+            return
         with _log_path.open("a", encoding="utf-8") as f:
             who = msg.get("name") or msg.get("who")
             f.write(f"- **{msg.get('ts','')} {who}**：{msg.get('text','')}\n")
@@ -881,10 +903,9 @@ def main() -> None:
     ready = [g for g in roster if g.get("ready")]
     use_real = args.real or (not args.demo and len(ready) >= 1)
 
-    _log_path.write_text(
-        f"# AI 茶话会记录\n\n- 开始：{datetime.now():%Y-%m-%d %H:%M}\n"
-        f"- 模式：{'真对话' if use_real else 'demo'}\n"
-        f"- 话题：{settings['topic']}\n\n", encoding="utf-8")
+    # ⭐ 每场讨论开一个新的日志文件（别再覆盖上一场的记录了）
+    logp = init_log(settings["topic"])
+    print(f"📄 本场记录：{logp}")
 
     def boot():
         time.sleep(args.delay)          # 等阿包把窗口打开

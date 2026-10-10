@@ -2,12 +2,13 @@
 keys.local.json
 config.local.json
 
-# 运行时产物
+# 运行时产物（每场讨论一个日志文件，会一直涨，不入库）
+logs/
 chat-log.md
 debate-history.json
 __pycache__/
 *.pyc
 
-# ⚠️ 立绘原图（avatars-src/）是第三方作品 —— 别推公开仓库。
-#    若确定仓库是 private，可以注释掉下一行、把原图也纳入版本管理。
+# ⚠️ 立绘原图（avatars-src/）：内容由阿包用 GPT 生成，公开无版权顾虑；
+#    但不入库（体积大、且属于素材而非代码）—— 需要时从本地拷。
 avatars-src/

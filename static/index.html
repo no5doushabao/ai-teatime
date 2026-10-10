@@ -135,6 +135,9 @@
     backdrop-filter: blur(3px); z-index: 50; animation: pop .2s ease-out;
   }
   .modal.hidden { display: none; }
+  /* ⚠️ 通用 .hidden（2026-10-11 补）：以前**只定义了 `.modal.hidden`**，害得
+     「参会者一览」里的滑块面板和红色警告框根本藏不住 —— 一直是显示着的（阿包发现的）。 */
+  .hidden { display: none; }
   /* ⭐ 叠在别的弹窗之上的弹窗（确认框、增加议题）—— 它们是从议题整理里点出来的，
      而议题整理在 DOM 里排在后面，不给更高层级就会被盖住（踩过） */
   .modal.top { z-index: 120; }
@@ -167,6 +170,14 @@
   .titem .done { color: #9fd39f; }
   .titem .who  { color: #9ecbff; }
   .titem .todo { color: #7d7d92; }
+  /* ⭐ 点中议题时，就地展开"为什么选它"的完整描述（阿包：方便用户查阅）——
+     展开会让弹窗自然长高（.mbox 有 max-height:90vh，过高就在列表里滚） */
+  .titem .tfull {
+    display: none; margin-top: 9px; padding-top: 9px;
+    border-top: 1px dashed #3d4a5e; font-size: 12px; color: #aab4c6;
+    line-height: 1.8; white-space: pre-wrap; word-break: break-word;
+  }
+  .titem.sel .tfull { display: block; }
   .tmore { font-size: 12px; color: #8b9ab0; padding: 10px 12px; margin-top: 6px;
            text-align: center; border-top: 1px dashed #33333f; }
   .mfoot { padding: 12px 20px 18px; display: flex; gap: 10px; align-items: center; }
@@ -522,7 +533,8 @@ function loadTopics() {
       el.className = "titem" + (t.index === d.current ? " sel" : "");
       el.dataset.index = t.index;
       el.innerHTML = `<div class="ti">${t.index + 1}</div><div><div class="tt">${esc(t.title)}</div>` +
-                     `<div class="tb">${bits.join(" · ")}</div></div>`;
+                     `<div class="tb">${bits.join(" · ")}</div>` +
+                     (t.body ? `<div class="tfull">${esc(t.body)}</div>` : "") + `</div>`;
       el.onclick = () => {
         topicList.querySelectorAll(".titem").forEach(x => x.classList.remove("sel"));
         el.classList.add("sel");

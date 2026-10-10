@@ -1211,7 +1211,9 @@ class Handler(SimpleHTTPRequestHandler):
             ready_n = sum(1 for g in load_roster() if g.get("ready"))
             md = parse_topics()
             body = json.dumps({
-                "topics": [{"index": i, "title": t["title"], "author": t.get("author", "")}
+                # ⭐ body 也带上：议题框里点中某条，要就地展开"为什么选它"给阿包查阅
+                "topics": [{"index": i, "title": t["title"],
+                            "author": t.get("author", ""), "body": t.get("body", "")}
                            for i, t in enumerate(md)],
                 "current": s["topic_index"],
                 "ready": ready_n,

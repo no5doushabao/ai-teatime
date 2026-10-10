@@ -494,6 +494,31 @@ def save_history(h: dict) -> None:
         pass
 
 
+# ⭐ 命题人 → 桌上的人（2026-10-11 修 bug 时加的）
+#   背景：开场白的提示词写着"把话头交给第一位发言者"，**但代码没告诉它第一位是谁** ——
+#   模型只好自己脑补成"这议题谁提的谁先说"，于是说出"把话筒交给千问"，
+#   而实际第一个开口的是阿鱼（roster 第一位）——**主持人自己抢了话筒**，阿包当场看出来了。
+#   现在两头对齐：① 开场白照实说第一位是谁 ② 命题人真在桌上，就让他先发言。
+_NAME_ALIAS = {
+    "克劳德": "claude", "claude": "claude",
+    "通义千问": "qwen", "通义": "qwen", "千问": "qwen",
+    "智谱清言": "glm", "智谱": "glm",
+    "阿鱼": "ayu", "grok": "grok", "gemini": "gemini", "gpt": "gpt",
+}
+
+
+def author_in_roster(author: str, roster: list):
+    """把议题作者对到桌上的某位；对不上（没 key / 名字不认识）返回 None → 回落到轮转。"""
+    a = (author or "").strip().lower()
+    if not a:
+        return None
+    a = _NAME_ALIAS.get(a, a)
+    for g in roster:
+        if a in ((g.get("name") or "").strip().lower(), (g.get("who") or "").strip().lower()):
+            return g
+    return None
+
+
 def load_settings() -> dict:
     cfg = load_json(ROOT / "config.local.json") or load_json(ROOT / "config.example.json")
     d = cfg.get("debate") or {}
@@ -501,9 +526,10 @@ def load_settings() -> dict:
     if md:                                     # ⭐ 优先用 topics.md
         topics = [t["title"] for t in md]
         bodies = {t["title"]: t["body"] for t in md}
+        authors = {t["title"]: t.get("author", "") for t in md}    # ⭐ 命题人：开场白要照实说
     else:                                      # 兜底：config 里的 topics
         topics = [t for t in (d.get("topics") or []) if t] or [d.get("topic") or "随便聊聊。"]
-        bodies = {}
+        bodies, authors = {}, {}
     idx = max(0, min(_chosen_topic_index, len(topics) - 1))
     topic = topics[idx]
     return {
@@ -516,6 +542,7 @@ def load_settings() -> dict:
         # ⭐ 议题讨论会（2026-10-10 改版：从"闲聊"改成"议题讨论"）
         "topic": topic,
         "topic_body": bodies.get(topic, ""),
+        "topic_author": authors.get(topic, ""),    # ⭐ 命题人（开场白 + 第一轮顺序要用）
         "topic_index": idx,
         "topics": topics,
         "style": d.get("style", "这是一场议题讨论会：请有明确立场、有论证、并回应他人观点。"),
@@ -860,15 +887,30 @@ class RealTable:
                       f"发言前须读完本轮已发言的全部内容", "system")
         self._hist_begin()             # ⭐ 记一笔：议题 / 参与者 / 计划轮数
 
+        # ⭐ 第一轮谁先开口（2026-10-11 修）：**命题人优先** —— 他在桌上就让他先讲；
+        #    不在场（比如"由克劳德提出"但 Claude 没配 key）就按老规矩从 roster 第一位开始。
+        first = author_in_roster(s.get("topic_author"), self.roster) or self.roster[0]
+        if first["who"] != self.roster[0]["who"]:
+            say("system", f"（这议题是 {first['name']} 提的 —— 本轮让他先发言）", "system")
+
         # ⭐ 阿鱼当主持：开场白由真模型生成（不是固定台词）—— 宣布议题、讲规则、引出第一个争点
         host = next((g for g in self.roster if g["who"] == "ayu"), None)
         if host:
+            # ⭐ 关键修复：把"第一位是谁"**明确喂给它**。以前只说"交给第一位发言者"，
+            #    模型拿不到名字只好自己猜（猜成"提案人先说"），于是出现
+            #    "把话筒交给千问、主持人自己却先开口"的滑稽场面（阿包 10-11 当场看出来的）。
+            if first["who"] == host["who"]:
+                tail = "③ 点出一个最值得先争的地方，然后**由你自己先说**（本轮第一位发言者就是你）。"
+            else:
+                tail = (f"③ 点出一个最值得先争的地方，然后把话头交给**{first['name']}**"
+                        f"（本轮第一位发言者，接下来就是他开口）。")
             try:
                 intro = llm_call(host["base_url"], host["model"], host["key"], [
                     {"role": "system", "content": (host.get("persona") or "") +
                      "\n\n你是这场讨论会的主持人。请用 150~300 字开场：① 宣布今晚的议题；"
                      "② 说清规则（每轮每人发言一次、要有立场和论证、必须回应他人）；"
-                     "③ 点出一个最值得先争的地方，然后把话头交给第一位发言者。"
+                     + tail +
+                     "⚠️ 只准点这一位先发言，别安排别人的顺序（后面的顺序由系统轮转）。"
                      "语气可以轻松、带点你自己的风格，但别拖沓。"},
                     {"role": "user", "content":
                         f"【本次议题】{s['topic']}\n\n【议题说明】\n"
@@ -911,6 +953,8 @@ class RealTable:
 
             shift = (r - 1) % len(self.roster)
             order = self.roster[shift:] + self.roster[:shift]      # 起点轮转
+            if r == 1:      # ⭐ 第一轮把命题人提到最前 —— 跟开场白里点名的那位**对齐**
+                order = [first] + [g for g in order if g["who"] != first["who"]]
             for g in order:
                 # ⭐ 更细的检查点：一轮要好几分钟，等人说完就停，别拖到下一轮
                 if _stop_event.is_set():

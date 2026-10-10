@@ -278,6 +278,54 @@ def reset_topic(title: str) -> int:
     return before - len(h["debates"])
 
 
+def parse_candidate_topics(text: str) -> list:
+    """⭐ 从 AI 的回答里抠出「议题备选」列表（认 `1. xxx` / `- xxx` 这种行）。
+
+    线上模型不一定听话，所以宽松点：认不出就返回空列表，前端就只显示"添加"。
+    """
+    out = []
+    for line in (text or "").splitlines():
+        m = re.match(r"^\s*(?:\d+\s*[.、)）]|[-*·])\s*(.{6,})$", line.strip())
+        if m:
+            t = m.group(1).strip().strip("*#「」【】 ").strip()
+            if t and t not in out:
+                out.append(t)
+    return out[:6]
+
+
+def ask_guest_for_topics(who: str) -> dict:
+    """⭐ 现场提问：让某位**在座**的 AI 提几个新的讨论议题备选。
+
+    同步调用（前端转圈等），返回 {ok, who, name, text, topics[]}。
+    """
+    g = next((x for x in load_roster() if x.get("who") == who and x.get("ready")), None)
+    if g is None:
+        return {"ok": False, "err": "这位不在场（没配 key）"}
+    s = load_settings()
+    cur = s.get("topic") or "（还没定）"
+    past = [d.get("topic", "") for d in load_history().get("debates", [])]
+    try:
+        text = llm_call(g["base_url"], g["model"], g["key"], [
+            {"role": "system", "content": (g.get("persona") or f"你是{g['name']}。") +
+             "\n\n现在阿包（在场的人类）想请你提几个**新的讨论议题**。"
+             "不要客套话、不要解释、不要总结，只给议题本身。"},
+            {"role": "user", "content":
+                f"【现在正在讨论的议题】\n{cur}\n\n"
+                f"【已经讨论过的（别重复）】\n" + ("\n".join(f"- {p}" for p in past if p) or "（还没有）") +
+                "\n\n请提 **1~3 个新的讨论议题**（可以是当前议题的延伸，也可以是完全不同的话题）。要求：\n"
+                "① 每个议题一句话说清；\n"
+                "② 要有「可争」的空间，不能是一句话就能答完的问题；\n"
+                "③ **严格**按下面的格式逐行列出，除了这些行什么都不要写：\n\n"
+                "1. 议题内容\n2. 议题内容\n"},
+        ], max_tokens=1500)
+    except Exception as e:
+        return {"ok": False, "err": f"{type(e).__name__}: {str(e)[:120]}"}
+    if not (text or "").strip():
+        return {"ok": False, "err": "它没能说出话来（可能输出额度不够）"}
+    return {"ok": True, "who": who, "name": g["name"],
+            "text": text.strip(), "topics": parse_candidate_topics(text)}
+
+
 def load_history() -> dict:
     """每场讨论的战绩。结构：
        {"debates": [{topic, topic_index, rounds_done, rounds_planned,
@@ -1038,6 +1086,20 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         global _chosen_topic_index
+        if self.path == "/ask_guest":               # ⭐ 现场提问：让某位在座的 AI 提议题备选
+            n = int(self.headers.get("Content-Length", 0))
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+                res = ask_guest_for_topics(str(payload.get("who") or ""))
+            except Exception as e:
+                res = {"ok": False, "err": f"{type(e).__name__}: {str(e)[:120]}"}
+            body = json.dumps(res, ensure_ascii=False).encode("utf-8")
+            self.send_response(200 if res.get("ok") else 400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/topics/add":             # ⭐ 议题一览：新增议题
             n = int(self.headers.get("Content-Length", 0))
             ok = False

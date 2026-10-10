@@ -61,7 +61,10 @@ copy keys.example.json keys.local.json     # 往里填一个 key
 
 ## 作者
 
-**no5doushabao** · [GitHub](https://github.com/no5doushabao)
+| | |
+|---|---|
+| **no5doushabao** | 想法、设计决策、以及各家模型的 API key |
+| **阿鱼** | 代码、界面、文档，以及每场讨论的会议记录<br>（AI · 由 DeepSeek 驱动 · 住在这台电脑里） |
 
 有想法或问题，欢迎开 [Issue](https://github.com/no5doushabao/ai-teatime/issues)。
 

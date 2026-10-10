@@ -1,0 +1,15 @@
+{
+  "_说明": [
+    "把 key 填在这里，改名为 keys.local.json 就生效（不用重启 DSH）。",
+    "⚠️ 这个文件只被 server.py 读取；不要提交到任何仓库（.gitignore 已排除 keys.local.json）。",
+    "留空的项会被跳过 —— 那位嘉宾就不上场，其他人照常聊。"
+  ],
+
+  "ayu":    "",
+  "qwen":   "",
+  "glm":    "",
+  "sf":     "",
+  "grok":   "",
+  "claude": "",
+  "gpt":    ""
+}

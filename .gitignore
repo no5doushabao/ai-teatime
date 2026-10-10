@@ -1,0 +1,13 @@
+# 只排除真正带密钥的文件；.example 模板要进仓库
+keys.local.json
+config.local.json
+
+# 运行时产物
+chat-log.md
+debate-history.json
+__pycache__/
+*.pyc
+
+# ⚠️ 立绘原图（avatars-src/）是第三方作品 —— 别推公开仓库。
+#    若确定仓库是 private，可以注释掉下一行、把原图也纳入版本管理。
+avatars-src/

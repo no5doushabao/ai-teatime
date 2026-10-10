@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>🍵 AI 讨论会</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.7 "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    background: linear-gradient(160deg, #1b1b21 0%, #17171c 60%, #14141a 100%);
+    color: #e8e8ee; display: flex; flex-direction: column;
+    overflow: hidden; user-select: none;
+  }
+
+  /* ── 顶栏 ── */
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; background: rgba(30,30,38,.92);
+    border-bottom: 1px solid #2c2c36; backdrop-filter: blur(6px);
+  }
+  .gname { font-weight: 700; font-size: 15px; }
+  .gsub  { font-size: 11px; color: #8b8b9c; }
+  .members { display: flex; margin-left: auto; }
+  .members img {
+    width: 26px; height: 26px; border-radius: 50%;
+    margin-left: -8px; border: 2px solid #1e1e26; background: #26262e;
+    image-rendering: pixelated; transition: transform .15s;
+  }
+  .members img:hover { transform: translateY(-2px) scale(1.08); }
+  .round-badge {
+    margin-left: 10px; font-size: 11px; padding: 3px 9px; border-radius: 10px;
+    background: #2a3d5c; color: #9ecbff; border: 1px solid #35507a; white-space: nowrap;
+  }
+
+  /* ── 议题条 ── */
+  #topicBar {
+    display: none; align-items: center; gap: 8px;
+    padding: 7px 14px; font-size: 12px; color: #9ecbff;
+    background: #212836; border-bottom: 1px solid #2c3a52;
+  }
+  #topicBar.on { display: flex; }
+  #topicBar .tl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ── 消息流 ── */
+  #flow { flex: 1; overflow-y: auto; padding: 16px 16px 6px; scroll-behavior: smooth; }
+  #flow::-webkit-scrollbar { width: 8px; }
+  #flow::-webkit-scrollbar-thumb { background: #33333e; border-radius: 4px; }
+
+  .row { display: flex; gap: 10px; margin-bottom: 16px; align-items: flex-start;
+         animation: pop .18s ease-out; }
+  @keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; } }
+  .row.me { flex-direction: row-reverse; }
+
+  .row img.av {
+    width: 42px; height: 42px; border-radius: 50%; flex: 0 0 42px;
+    background: #26262e; border: 2px solid #2f2f3a; image-rendering: pixelated;
+  }
+  .row.me img.av { border-color: #4a6fa5; }
+  .body { max-width: 88%; }          /* ⭐ 加宽：长发言要放得下 */
+  .row.me .body { text-align: right; }
+
+  .meta { font-size: 11px; color: #83839a; margin-bottom: 4px; }
+  .meta .nm { color: #b9b9cc; font-weight: 600; font-size: 12.5px; }
+  .meta .org { color: #6c6c80; margin-left: 5px; }
+
+  .bubble {
+    display: inline-block; text-align: left; padding: 11px 15px;
+    border-radius: 13px; background: #2a2a34; color: #e9e9f0;
+    word-break: break-word; box-shadow: 0 1px 3px rgba(0,0,0,.35);
+    border: 1px solid #33333f; white-space: pre-wrap;
+  }
+  .row.me .bubble { background: #3a5c8a; border-color: #4a6fa5; color: #fff; }
+  .row[data-who="grok"]   .bubble { border-left: 3px solid #6c6c7c; }
+  .row[data-who="qwen"]   .bubble { border-left: 3px solid #8a6fd0; }
+  .row[data-who="claude"] .bubble { border-left: 3px solid #d67a5c; }
+  .row[data-who="gpt"]    .bubble { border-left: 3px solid #2f9e80; }
+  .row[data-who="ayu"]    .bubble { border-left: 3px solid #5696d6; }
+
+  /* ⭐ 长文折叠按钮 */
+  .more {
+    display: block; margin-top: 7px; font-size: 11.5px; cursor: pointer;
+    color: #8fb8e8; background: rgba(90,140,210,.13); border: 1px solid #35507a;
+    padding: 3px 10px; border-radius: 9px; width: fit-content;
+  }
+  .more:hover { background: rgba(90,140,210,.24); }
+
+  .sys { text-align: center; margin: 10px 0 14px; }
+  .sys span {
+    font-size: 11px; color: #7d7d92; background: #23232c;
+    padding: 3px 12px; border-radius: 10px; border: 1px solid #2d2d38;
+  }
+  .sys.round span { color: #9ecbff; background: #232b3a; border-color: #33445e;
+                    font-weight: 600; letter-spacing: .5px; }
+
+  /* ⭐ 会议纪要卡片（公用历史框） */
+  .notes {
+    margin: 12px 0 16px; padding: 12px 15px; border-radius: 12px;
+    background: linear-gradient(180deg, rgba(60,80,60,.22), rgba(40,55,45,.18));
+    border: 1px solid #3d513d; font-size: 13px; color: #cfe6cf;
+    white-space: pre-wrap; line-height: 1.75;
+  }
+  .notes .nh { font-weight: 700; color: #b7e0b7; margin-bottom: 6px; font-size: 12.5px; }
+
+  /* ── 底栏 ── */
+  footer { padding: 10px 14px 12px; background: rgba(30,30,38,.92);
+           border-top: 1px solid #2c2c36; }
+  .seat { font-size: 11px; color: #7d7d92; margin-bottom: 6px;
+          display: flex; align-items: center; gap: 6px; }
+  .seat .sp { flex: 1; }
+  .inputbar { display: flex; gap: 8px; }
+  input {
+    flex: 1; padding: 10px 13px; border-radius: 10px; border: 1px solid #34343f;
+    background: #22222b; color: #eaeaf2; font-size: 14px; outline: none;
+  }
+  input:focus { border-color: #4a6fa5; box-shadow: 0 0 0 2px rgba(74,111,165,.22); }
+  button {
+    padding: 0 18px; border-radius: 10px; border: 0; cursor: pointer;
+    background: linear-gradient(180deg,#4a7fc4,#3d68a0); color: #fff;
+    font-size: 14px; font-weight: 600;
+  }
+  button:active { transform: translateY(1px); }
+  button:disabled { opacity: .45; cursor: default; }
+  .mini {
+    padding: 3px 10px; font-size: 11.5px; border-radius: 8px; font-weight: 400;
+    background: #2f3d2f; color: #b7e0b7; border: 1px solid #3d513d;
+  }
+  .mini:hover { background: #3a4c3a; }
+
+  /* ── ⭐ 议题选择弹窗 ── */
+  .modal {
+    position: fixed; inset: 0; background: rgba(8,8,12,.72);
+    display: flex; align-items: center; justify-content: center;
+    backdrop-filter: blur(3px); z-index: 50; animation: pop .2s ease-out;
+  }
+  .modal.hidden { display: none; }
+  .mbox {
+    width: 92%; max-width: 560px; max-height: 86vh; display: flex; flex-direction: column;
+    background: #212129; border: 1px solid #34343f; border-radius: 16px;
+    box-shadow: 0 18px 50px rgba(0,0,0,.6); overflow: hidden;
+  }
+  .mhead { padding: 16px 20px 10px; }
+  .mtitle { font-size: 17px; font-weight: 700; }
+  .msub { font-size: 12px; color: #8b8b9c; margin-top: 4px; }
+  .tlist { padding: 6px 12px 4px; overflow-y: auto; }
+  .tlist::-webkit-scrollbar { width: 8px; }
+  .tlist::-webkit-scrollbar-thumb { background: #33333e; border-radius: 4px; }
+  .titem {
+    display: flex; gap: 10px; padding: 11px 13px; margin: 6px 0; cursor: pointer;
+    border-radius: 11px; border: 1px solid #2f2f3a; background: #26262e;
+    transition: all .12s;
+  }
+  .titem:hover { background: #2d2d38; border-color: #3d4a5e; }
+  .titem.sel { background: #2a3d5c; border-color: #4a7fc4; box-shadow: 0 0 0 2px rgba(74,127,196,.25); }
+  .titem .ti {
+    flex: 0 0 24px; height: 24px; line-height: 24px; text-align: center;
+    border-radius: 7px; background: #33333f; font-size: 12px; color: #9ecbff; font-weight: 700;
+  }
+  .titem.sel .ti { background: #4a7fc4; color: #fff; }
+  .titem .tt { font-size: 13.5px; line-height: 1.55; }
+  .titem .tb { font-size: 11.5px; color: #83839a; margin-top: 3px;
+               overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .mfoot { padding: 12px 20px 18px; display: flex; gap: 10px; align-items: center; }
+  .mfoot .hint { flex: 1; font-size: 11.5px; color: #83839a; }
+  .ghost { background: #2a2a34; border: 1px solid #3a3a46; color: #c9c9d6; }
+
+  /* ⭐ 议题库 */
+  .hitem { padding: 11px 13px; margin: 6px 0; border-radius: 11px;
+           border: 1px solid #2f2f3a; background: #26262e; }
+  .hitem .ht { font-size: 13.5px; line-height: 1.55; }
+  .hitem .hm { font-size: 11.5px; color: #83839a; margin-top: 5px; }
+  .hitem .done { color: #9fd39f; font-weight: 600; }
+  .hitem .todo { color: #7d7d92; }
+  .hitem .who  { color: #9ecbff; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="gname">🍵 AI 讨论会</div>
+    <div class="gsub">圆桌制 · 阿鱼主持 · 一轮每人一次</div>
+  </div>
+  <div class="members" id="members"></div>
+  <div class="round-badge" id="roundBadge">准备中</div>
+</header>
+
+<div id="topicBar">
+  <span>📌</span><span class="tl" id="topicText"></span>
+  <button class="mini" id="libBtn">📚 议题库</button>
+  <button class="mini" id="changeTopic">换议题</button>
+</div>
+
+<div id="flow"></div>
+
+<footer>
+  <div class="seat">
+    <span>💬 旁听席（你）—— 说的话会进下一轮，大家都会看到</span>
+    <span class="sp"></span>
+    <button id="startBtn" class="mini">🍵 开场 / 换议题</button>
+  </div>
+  <div class="inputbar">
+    <input id="msg" placeholder="说点什么…（Enter 发送）" autocomplete="off">
+    <button id="send">发送</button>
+  </div>
+</footer>
+
+<!-- ⭐ 议题选择弹窗：每次打开窗口都会弹出来 -->
+<div id="modal" class="modal hidden">
+  <div class="mbox">
+    <div class="mhead">
+      <div class="mtitle">🍵 今晚讨论什么？</div>
+      <div class="msub" id="mSub">正在读取议题…</div>
+    </div>
+    <div class="tlist" id="topicList"></div>
+    <div class="mfoot">
+      <span class="hint" id="mHint"></span>
+      <button class="ghost" id="mClose">先不开始</button>
+      <button id="mStart" disabled>开始讨论</button>
+    </div>
+  </div>
+</div>
+
+<!-- ⭐ 议题库：所有议题 + 讨论过的轮次与参与者 -->
+<div id="libModal" class="modal hidden">
+  <div class="mbox">
+    <div class="mhead">
+      <div class="mtitle">📚 议题库</div>
+      <div class="msub" id="libSub">正在读取…</div>
+    </div>
+    <div class="tlist" id="libList"></div>
+    <div class="mfoot">
+      <span class="hint">议题来自 <code>topics.md</code>，改那个文件就能加题</span>
+      <button id="libClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const FALLBACK = ["ayu", "grok", "qwen", "claude", "gpt"];
+const flow = document.getElementById("flow");
+const badge = document.getElementById("roundBadge");
+const modal = document.getElementById("modal");
+let lastRound = 0;
+let lastSeq = 0;
+let pickedTopic = null;
+let canStart = false;
+
+function esc(s) {
+  return (s || "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+
+/* ── 顶栏成员头像 ── */
+const members = document.getElementById("members");
+fetch("/roster").then(r => r.json()).then(d => {
+  const list = (d.guests && d.guests.length) ? d.guests : FALLBACK.map(w => ({ who: w, ready: true }));
+  list.forEach(g => {
+    const im = document.createElement("img");
+    im.src = `/avatars/${g.who}.png`;
+    im.title = (g.name || g.who) + (g.ready ? "" : "（没配 key）");
+    if (!g.ready) im.style.opacity = "0.3";
+    members.appendChild(im);
+  });
+}).catch(() => {
+  FALLBACK.forEach(w => {
+    const im = document.createElement("img");
+    im.src = `/avatars/${w}.png`; im.title = w;
+    members.appendChild(im);
+  });
+});
+
+/* ── ⭐ 议题弹窗 ── */
+const topicList = document.getElementById("topicList");
+const mSub = document.getElementById("mSub");
+const mHint = document.getElementById("mHint");
+const mStart = document.getElementById("mStart");
+
+function showModal() { modal.classList.remove("hidden"); }
+function hideModal() { modal.classList.add("hidden"); }
+
+function loadTopics() {
+  fetch("/topics").then(r => r.json()).then(d => {
+    topicList.innerHTML = "";
+    const n = d.topics.length;
+    mSub.textContent = `共 ${n} 个议题 · 在场 ${d.ready} 位（至少 ${d.min_guests} 位可开场）`;
+    canStart = d.ready >= d.min_guests;
+    mHint.textContent = canStart ? "选一个议题，阿鱼会开场主持" : `⚠️ 只有 ${d.ready} 位就绪，还差 ${d.min_guests - d.ready} 位`;
+    mStart.disabled = !canStart;
+    d.topics.forEach(t => {
+      const el = document.createElement("div");
+      el.className = "titem" + (t.index === d.current ? " sel" : "");
+      el.dataset.index = t.index;
+      el.innerHTML = `<div class="ti">${t.index + 1}</div><div><div class="tt">${esc(t.title)}</div></div>`;
+      el.onclick = () => {
+        topicList.querySelectorAll(".titem").forEach(x => x.classList.remove("sel"));
+        el.classList.add("sel");
+        pickedTopic = t.index;
+        mStart.disabled = !canStart;
+        if (canStart) document.getElementById("topicText").textContent = t.title;
+      };
+      topicList.appendChild(el);
+      if (pickedTopic === null) pickedTopic = d.current;
+    });
+    showModal();
+  }).catch(() => { mSub.textContent = "读不到议题（服务没起来？）"; showModal(); });
+}
+
+/* ── ⭐ 议题库（显示所有议题 + 讨论过的轮次与参与者）── */
+const libModal = document.getElementById("libModal");
+const libList = document.getElementById("libList");
+const libSub = document.getElementById("libSub");
+
+function showLib() {
+  libModal.classList.remove("hidden");
+  libSub.textContent = "正在读取…";
+  libList.innerHTML = "";
+  Promise.all([
+    fetch("/topics").then(r => r.json()),
+    fetch("/history").then(r => r.json()).catch(() => ({ debates: [] }))
+  ]).then(([t, h]) => {
+    const debates = (h && h.debates) || [];
+    libSub.textContent = `共 ${t.topics.length} 个议题 · 已讨论 ${debates.length} 场`;
+    t.topics.forEach(tp => {
+      const mine = debates.filter(d => (d.topic || "").trim() === tp.title.trim());
+      const el = document.createElement("div");
+      el.className = "hitem";
+      let meta;
+      if (mine.length) {
+        const last = mine[mine.length - 1];
+        const total = mine.reduce((a, x) => a + (x.rounds_done || 0), 0);
+        const who = [...new Set(mine.flatMap(x => x.participants || []))].join("、");
+        meta = `<span class="done">（已讨论 ${total} 个轮次${mine.length > 1 ? ` · ${mine.length} 场` : ""}）</span>` +
+               ` 参与者：<span class="who">${esc(who)}</span>` +
+               (last.finished ? ` <span class="todo">· 最近 ${esc(last.finished)}</span>`
+                              : ` <span class="todo">· 进行中</span>`);
+      } else {
+        meta = `<span class="todo">（还没讨论过）</span>`;
+      }
+      el.innerHTML = `<div class="ht">${tp.index + 1}. ${esc(tp.title)}</div><div class="hm">${meta}</div>`;
+      libList.appendChild(el);
+    });
+  }).catch(() => { libSub.textContent = "读不到议题库"; });
+}
+document.getElementById("libBtn").onclick = showLib;
+document.getElementById("libClose").onclick = () => libModal.classList.add("hidden");
+
+mStart.onclick = async () => {
+  if (!canStart || pickedTopic === null) return;
+  const t = topicList.querySelector(`.titem[data-index="${pickedTopic}"] .tt`);
+  if (t) {
+    document.getElementById("topicText").textContent = t.textContent;
+    document.getElementById("topicBar").classList.add("on");
+  }
+  hideModal();
+  await fetch("/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ topic_index: pickedTopic })
+  });
+};
+document.getElementById("mClose").onclick = hideModal;
+document.getElementById("changeTopic").onclick = showModal;
+document.getElementById("startBtn").onclick = showModal;
+
+/* ── 消息渲染 ── */
+const LONG = 260;        // ⭐ 超过这个字数就折叠，免得一场讨论刷出几千行
+
+function addBubbleText(el, text) {
+  if (text.length <= LONG) { el.textContent = text; return; }
+  const short = text.slice(0, LONG);
+  el.textContent = short + "…";
+  const btn = document.createElement("span");
+  btn.className = "more";
+  let open = false;
+  btn.textContent = `展开全文（共 ${text.length} 字）`;
+  btn.onclick = () => {
+    open = !open;
+    el.textContent = open ? text : short + "…";
+    el.appendChild(btn);
+    btn.textContent = open ? "收起" : `展开全文（共 ${text.length} 字）`;
+  };
+  el.appendChild(btn);
+}
+
+function addMsg(m) {
+  if (m.seq && m.seq <= lastSeq) return;
+  if (m.seq) lastSeq = m.seq;
+
+  if (m.kind === "round") {
+    const d = document.createElement("div");
+    d.className = "sys round";
+    d.innerHTML = `<span>${esc(m.text)}</span>`;
+    flow.appendChild(d);
+    flow.scrollTop = flow.scrollHeight;
+    return;
+  }
+  // ⭐ 会议纪要（公用历史框）单独做成卡片
+  if (m.kind === "system" && (m.text || "").startsWith("📝")) {
+    const d = document.createElement("div");
+    d.className = "notes";
+    const parts = m.text.split("\n");
+    d.innerHTML = `<div class="nh">${esc(parts[0])}</div>${esc(parts.slice(1).join("\n"))}`;
+    flow.appendChild(d);
+    flow.scrollTop = flow.scrollHeight;
+    return;
+  }
+  if (m.kind === "system" || m.who === "system") {
+    const d = document.createElement("div");
+    d.className = "sys";
+    d.innerHTML = `<span>${esc(m.text)}</span>`;
+    flow.appendChild(d);
+    flow.scrollTop = flow.scrollHeight;
+    return;
+  }
+
+  const me = m.who === "boss";
+  const row = document.createElement("div");
+  row.className = "row" + (me ? " me" : "");
+  row.dataset.who = m.who;
+  row.innerHTML =
+    `<img class="av" src="/avatars/${m.who}.png" alt="">` +
+    `<div class="body">` +
+      `<div class="meta"><span class="nm">${esc(m.name)}</span>` +
+      (m.org ? `<span class="org">${esc(m.org)}</span>` : "") +
+      `<span class="org">${esc(m.ts || "")}</span></div>` +
+      `<div class="bubble"></div>` +
+    `</div>`;
+  addBubbleText(row.querySelector(".bubble"), m.text || "");
+  flow.appendChild(row);
+  flow.scrollTop = flow.scrollHeight;
+
+  if (m.round && m.round !== lastRound) {
+    lastRound = m.round;
+    badge.textContent = `第 ${m.round} 轮`;
+  }
+}
+
+const es = new EventSource("/stream");
+es.onmessage = e => { try { addMsg(JSON.parse(e.data)); } catch (_) {} };
+es.onerror = () => { badge.textContent = "连接断开…"; };
+
+/* ── 旁听席发言 ── */
+async function send() {
+  const inp = document.getElementById("msg");
+  const t = inp.value.trim();
+  if (!t) return;
+  inp.value = "";
+  await fetch("/say", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: t })
+  });
+}
+document.getElementById("send").onclick = send;
+document.getElementById("msg").addEventListener("keydown", e => {
+  if (e.key === "Enter") send();
+});
+
+/* ⭐ 打开窗口就弹议题选择（阿包 2026-10-10 的要求） */
+loadTopics();
+</script>
+</body>
+</html>

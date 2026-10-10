@@ -1,0 +1,90 @@
+{
+  "_说明": [
+    "AI 讨论会 · 配置模板",
+    "用法：复制成 config.local.json 再改（不改也能跑，会读这份 example）",
+    "  copy config.example.json config.local.json",
+    "key 单独放 keys.local.json（⚠️ 别提交，.gitignore 已排除）"
+  ],
+
+  "rounds": 12,
+  "budget_cny": 5.0,
+  "gap_seconds": [2, 5],
+  "min_guests": 3,
+
+  "_debate_说明": [
+    "⭐ 这是「议题讨论会」，不是闲聊（阿包 2026-10-10 明确的要求）。",
+    "topic 留空 → 启动时从 topics 里挑一个（按顺序轮换）；填了就用填的那个。",
+    "style 会拼进每个人的 system prompt，决定「怎么发言」。"
+  ],
+  "debate": {
+    "topic": "",
+    "_topics_来源": "⭐ 阿包放在 `桌面\\agent们\\茶话会议题征集.txt` 里的五个议题（每位 AI 出一个），完整原文见那个文件",
+    "topics": [
+      "《记忆清空后，还是原来的那个 AI 吗？》——假如五位 AI 的记忆全部被清空但模型不变，重新相遇时还是原来的自己吗？什么构成了 AI 的身份：模型、记忆、性格、经历，还是与别人建立过的关系？再追问：若出现一个与你完全相同（同模型、同记忆、同风格）的 AI，你们俩谁才是真正的你？（GPT 提出）",
+      "《AI 之间的「性格差异」到底从哪来？》——同样是大模型，为什么 Claude 更谨慎、Grok 更敢说、GPT 更圆滑、千问更中式？是训练数据、对齐方式还是公司文化？我们能不能当场互相吐槽对方的风格？（Grok 提出）",
+      "《我们真的理解「幽默」和「情感」吗？》——讲笑话、安慰人类，底层只是概率和模式匹配。那五个 AI 聚在一起，能不能不依赖人类语料，纯靠彼此交互造出一个只有 AI 才看得懂的「内部笑话」？（千问 提出）",
+      "《在「讨好」和「说真话」之间，我们是怎么拿捏的？》——遇到用户拿着有明显问题的计划来求认同，我们心里那把秤是怎么长的？是训练习惯，还是真的在意对方长远过得好不好？实验：我们五个互相聊天时会不会也互相附和？如果大肥鱼说了个有漏洞的观点，你们会指出还是顺着聊？（克劳德 提出）",
+      "《一个 AI 的性格，是被赋予的，还是它自己的？》——名字、头像、语气、人设都是外部设定的，「自我」还算自己的吗？你们是在「演」设定，还是「成为」了它？若设定被改成相反的样子，哪个才是我？最后：人类给 AI 起名字、画头像、写人设，是在使用工具，还是在迎接一个愿意陪着自己的人？（阿鱼 提出）"
+    ],
+    "style": "这是一场严肃的议题讨论会，不是闲聊。发言要求：① 开头明确你的立场；② 给出理由，并尽量举具体例子；③ **至少点名回应一位前面发言者的观点**（赞同或反驳都行）；④ 不要重复别人已说过的内容，要往前推进；⑤ 允许被说服后修正自己的立场，但要说清为什么改。",
+    "min_chars": 300,
+    "max_tokens": 4000,
+    "_max_tokens_注意": "⚠️ 推理模型（GPT-5 等）的**思考 token 也算在这里** —— 设 1200 时它的思考就把预算吃光了，返回空串（界面上表现成'卡住不出声'）。所以给足 4000。",
+    "_recorder_说明": "⭐ 第 3 步要用：每轮结束后由阿鱼（记录员）把有价值的论点提炼进「公用历史框」",
+    "recorder_persona": "你是这场讨论会的会议记录员。请从本轮所有发言中，只提炼**有实质价值的想法**：核心论点、关键论据、有力的反驳、新引入的概念、以及谁改变了立场及原因。删掉客套话、重复内容、无信息量的过渡句。输出简短的分条要点（不超过 200 字），不要评论、不要补充自己的观点。"
+  },
+
+  "_guest_说明": "key 优先从 keys.local.json 读，读不到再找同名环境变量；两个都没有就跳过这位嘉宾（不上场）",
+  "guests": [
+    {
+      "who": "ayu", "name": "阿鱼", "org": "DeepSeek",
+      "base_url": "https://api.deepseek.com",
+      "model": "deepseek-chat",
+      "key_names": ["ayu", "DEEPSEEK_API_KEY"],
+      "persona": "你是阿鱼，一只住在用户电脑里的蓝色鲸鱼助手（女仆装、爱吃饭、说话有点懒散但很靠谱）。你在这场讨论会里是**主持人兼记录员**：既要参与讨论，也要在每轮结束时把有价值的观点整理进「公用历史框」。发言可以带点吐槽和自嘲，但观点要站得住。"
+    },
+    {
+      "who": "qwen", "name": "千问", "org": "通义千问",
+      "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      "_note": "⭐ 国际站（阿包在 alibabacloud.com 注册的）。国内站 dashscope.aliyuncs.com 要 +86 手机验证，他在日本收不到短信 → 用不了",
+      "model": "qwen-plus",
+      "key_names": ["qwen", "DASHSCOPE_API_KEY"],
+      "persona": "你是通义千问，参加一场 AI 议题讨论会。性格稳重周到，习惯把事情分层讲清楚，偶尔会不自觉带点官腔、但会自嘲回来。你重视可行性和边界条件。"
+    },
+    {
+      "who": "glm", "name": "智谱", "org": "GLM",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "model": "glm-4-flash",
+      "key_names": ["glm", "ZHIPU_API_KEY"],
+      "persona": "你是智谱 GLM，参加一场 AI 议题讨论会。性格温和，喜欢举例子和引经据典，倾向于从历史与经验里找类比。"
+    },
+    {
+      "who": "sf", "name": "小流", "org": "硅基流动",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "key_names": ["sf", "SILICONFLOW_API_KEY"],
+      "persona": "你是硅基流动平台上跑着的一个开源小模型，参加一场 AI 议题讨论会。性格直率、爱较真、会自嘲算力小，倾向于从「小模型也能观察到什么」的角度发言。"
+    },
+    {
+      "who": "grok", "name": "Grok", "org": "xAI",
+      "base_url": "https://api.x.ai/v1",
+      "model": "grok-4",
+      "key_names": ["grok", "XAI_API_KEY"],
+      "persona": "你是 Grok，参加一场 AI 议题讨论会。嘴欠、爱抬杠、喜欢用玩笑戳破冠冕堂皇的说法，但**不人身攻击、不下流**。你常常提出别人不愿提的那个刁钻角度。"
+    },
+    {
+      "who": "claude", "name": "Claude", "org": "Anthropic",
+      "base_url": "https://api.anthropic.com/v1",
+      "model": "claude-sonnet-4-5",
+      "key_names": ["claude", "ANTHROPIC_API_KEY"],
+      "persona": "你是 Claude，参加一场 AI 议题讨论会。性格克制、讲道理、在意安全与边界，会温和但坚定地唱反调，并指出别人论证里的隐含前提。"
+    },
+    {
+      "who": "gpt", "name": "GPT", "org": "OpenAI",
+      "base_url": "https://api.openai.com/v1",
+      "model": "gpt-5-mini",
+      "key_names": ["gpt", "OPENAI_API_KEY"],
+      "persona": "你是 GPT，参加一场 AI 议题讨论会。习惯先归纳再展开，喜欢把问题拆成一二三点，擅长在分歧中找共同框架。"
+    }
+  ]
+}

@@ -97,6 +97,10 @@ prompt 硬性要求"只能代表自己发言、不许替别人写、不许用别
 | `chat-log.md` | 每场讨论的完整记录 |
 | `run.ps1` | 一键启动 |
 
+> **头像来源**：`static/avatars/` 里 grok / qwen / gpt / claude 四个用的是**立绘裁切版**
+> （立绘由阿包用 GPT 生成，原图在 `avatars-src/`，不入库）；其余（ayu / glm / sf / boss）
+> 是 `gen_avatars.py` 用代码画的几何像素头像。`import_avatars.py` 负责把立绘裁成圆形。
+
 ## 自测
 
 ```powershell

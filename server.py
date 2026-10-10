@@ -191,17 +191,52 @@ def save_topics(order: list) -> bool:
         return False
     if sorted(idx) != list(range(len(items))):
         return False
+    return write_topics([items[i] for i in idx])
+
+
+def write_topics(items: list) -> bool:
+    """⭐ 把给定的议题列表（按顺序）写回 `topics.md`。
+
+    排序 / 删除 / 新增都走这里 —— 只认 title + body，其余格式统一生成。
+    ⚠️ 保留文件开头到第一个 `## ` 之前的部分（那是阿包自己写的说明），别冲掉。
+    """
     path = ROOT / "topics.md"
-    raw = path.read_text(encoding="utf-8", errors="replace")
-    head = raw.split("\n## ", 1)[0].rstrip()      # ⭐ 保留开头的说明区
+    raw = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+    head = raw.split("\n## ", 1)[0].rstrip() or "# AI 讨论会 · 议题库"
     lines = [head, ""]
-    for i in idx:
-        t = items[i]
+    for t in items:
         lines += ["", "---", "", f"## {t['title']}", ""]
-        if t["body"]:
+        if t.get("body"):
             lines += [t["body"], ""]
-    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    try:
+        path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    except Exception:
+        return False
     return True
+
+
+def delete_topic(index: int) -> bool:
+    """⭐ 删掉一个议题（议题一览里的「删除」按钮）。"""
+    items = parse_topics()
+    if not items or not (0 <= int(index) < len(items)):
+        return False
+    return write_topics([t for i, t in enumerate(items) if i != int(index)])
+
+
+def reset_topic(title: str) -> int:
+    """⭐ 清掉某个议题的讨论战绩（议题一览里的「重置」按钮）——清完它就能重新讨论。
+
+    只动 `debate-history.json`，不碰 `topics.md` 和已落盘的日志文件。
+    返回清掉的场次数。
+    """
+    want = (title or "").strip()
+    if not want:
+        return 0
+    h = load_history()
+    before = len(h["debates"])
+    h["debates"] = [d for d in h["debates"] if (d.get("topic") or "").strip() != want]
+    save_history(h)
+    return before - len(h["debates"])
 
 
 def load_history() -> dict:
@@ -962,6 +997,40 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         global _chosen_topic_index
+        if self.path == "/topics/delete":          # ⭐ 议题一览：删除某个议题
+            n = int(self.headers.get("Content-Length", 0))
+            ok = False
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+                ok = delete_topic(int(payload.get("index", -1)))
+                if ok:
+                    say("system", "🗑 已从议题库删除一个议题（topics.md 已更新）", "system")
+            except Exception:
+                ok = False
+            body = json.dumps({"ok": ok}, ensure_ascii=False).encode("utf-8")
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/topics/reset":           # ⭐ 议题一览：重置某个议题的讨论战绩
+            n = int(self.headers.get("Content-Length", 0))
+            cleared = 0
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+                cleared = reset_topic(payload.get("title") or "")
+                if cleared:
+                    say("system", f"♻️ 已重置该议题的讨论战绩（清掉 {cleared} 场记录）", "system")
+            except Exception:
+                cleared = 0
+            body = json.dumps({"ok": True, "cleared": cleared}, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/topics/reorder":         # ⭐ 议题一览里拖动排序 → 写回 topics.md
             n = int(self.headers.get("Content-Length", 0))
             ok = False

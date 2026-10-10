@@ -170,7 +170,8 @@
            cursor: grab; transition: background .12s, border-color .12s; }
   .hitem:hover { background: #2d2d38; border-color: #3d4a5e; }
   .hitem.dragging { opacity: .45; border-color: #4a7fc4; background: #2a3d5c; cursor: grabbing; }
-  .hitem .hd { display: flex; align-items: baseline; gap: 8px; }
+  .hitem .hrow { display: flex; align-items: flex-start; gap: 8px; }
+  .hitem .hd { display: flex; align-items: baseline; gap: 8px; flex: 1; min-width: 0; }
   .hitem .grip { color: #565668; font-size: 15px; cursor: grab; flex: 0 0 auto; }
   .hitem .num  { color: #9ecbff; font-weight: 700; font-size: 12.5px; flex: 0 0 auto; }
   .hitem .ht { font-size: 14px; line-height: 1.6; }
@@ -178,6 +179,16 @@
   .hitem .done { color: #9fd39f; font-weight: 600; }
   .hitem .todo { color: #7d7d92; }
   .hitem .who  { color: #9ecbff; }
+  /* ⭐ 每项的小按钮（删除 / 重置）*/
+  .hbtns { display: flex; gap: 6px; flex: 0 0 auto; opacity: .35; transition: opacity .12s; }
+  .hitem:hover .hbtns { opacity: 1; }
+  .ibtn {
+    padding: 4px 9px; font-size: 12.5px; line-height: 1.2; border-radius: 8px; cursor: pointer;
+    background: #2f2f3a; border: 1px solid #3d3d4a; color: #c9c9d6; font-weight: 400;
+  }
+  .ibtn:hover { background: #3a3a46; }
+  .ibtn.del:hover { background: #5c2f2f; border-color: #8a4444; color: #ffd9d9; }
+  .ibtn.rst:hover { background: #2f4a3a; border-color: #447a55; color: #d9ffe4; }
 
   /* ⭐ 最终会议纪要（阿鱼整理的那份大总结） */
   .summary {
@@ -241,6 +252,20 @@
   </div>
 </div>
 
+<!-- ⭐ 通用确认框（删除议题这种危险操作要问一句）-->
+<div id="cfModal" class="modal hidden">
+  <div class="mbox" style="max-width:440px">
+    <div class="mhead">
+      <div class="mtitle" id="cfTitle">确认？</div>
+      <div class="msub" id="cfBody" style="font-size:13px;line-height:1.75;color:#c9d6e8"></div>
+    </div>
+    <div class="mfoot" style="justify-content:flex-end">
+      <button class="ghost" id="cfNo">取消</button>
+      <button id="cfYes">确定</button>
+    </div>
+  </div>
+</div>
+
 <!-- ⭐ 结束议题后，阿鱼来问一句 -->
 <div id="askModal" class="modal hidden">
   <div class="mbox askbox" style="max-width:420px">
@@ -268,6 +293,7 @@
     <div class="tlist" id="libList"></div>
     <div class="mfoot">
       <span class="hint">⭐ <b>按住拖动可以排序</b>，松手即保存（写回 <code>topics.md</code>）</span>
+      <button class="ghost" id="libAdd">➕ 增加议题</button>
       <button id="libClose">关闭</button>
     </div>
   </div>
@@ -412,8 +438,43 @@ function showLib() {
         meta = `<span class="todo">（还没讨论过）</span>`;
       }
       el.innerHTML =
-        `<div class="hd"><span class="grip">⠿</span><span class="num">${tp.index + 1}.</span>` +
-        `<span class="ht">${esc(tp.title)}</span></div><div class="hm">${meta}</div>`;
+        `<div class="hrow"><div class="hd"><span class="grip">⠿</span><span class="num">${tp.index + 1}.</span>` +
+        `<span class="ht">${esc(tp.title)}</span></div>` +
+        `<div class="hbtns">` +
+        `<button class="ibtn rst" title="清空这个议题的讨论战绩（议题保留）">♻️ 重置</button>` +
+        `<button class="ibtn del" title="从议题库删掉这个议题">🗑 删除</button>` +
+        `</div></div><div class="hm">${meta}</div>`;
+      // ⭐ 按钮必须阻止拖动，否则点按钮会变成"拖动议题"
+      el.querySelectorAll(".ibtn").forEach(b => {
+        b.draggable = false;
+        b.onmousedown = e => e.stopPropagation();
+      });
+      const rt = el.querySelector(".rst");
+      if (rt) rt.onclick = e => {
+        e.stopPropagation();
+        askConfirm("♻️ 重置讨论战绩",
+          `把「${tp.title}」的讨论记录清空？\n\n议题本身会保留，清完就能重新讨论。已经落盘的日志文件不会删。`,
+          "重置", async () => {
+            await fetch("/topics/reset", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ title: tp.title })
+            });
+            showLib();
+          });
+      };
+      const dl = el.querySelector(".del");
+      if (dl) dl.onclick = e => {
+        e.stopPropagation();
+        askConfirm("🗑 删除议题",
+          `确定把「${tp.title}」从议题库删掉？\n\n会写回 topics.md —— 删了就没了。`,
+          "删除", async () => {
+            await fetch("/topics/delete", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ index: tp.index })
+            });
+            showLib();
+          });
+      };
       attachDnD(el);
       libList.appendChild(el);
     });
@@ -421,6 +482,29 @@ function showLib() {
 }
 document.getElementById("libBtn").onclick = showLib;
 document.getElementById("libClose").onclick = () => libModal.classList.add("hidden");
+
+/* ⭐ 通用确认框 */
+const cfModal = document.getElementById("cfModal");
+let cfAction = null;
+function askConfirm(title, body, yesText, action) {
+  document.getElementById("cfTitle").textContent = title;
+  document.getElementById("cfBody").textContent = body;
+  document.getElementById("cfYes").textContent = yesText;
+  cfAction = action;
+  cfModal.classList.remove("hidden");
+}
+document.getElementById("cfNo").onclick = () => { cfModal.classList.add("hidden"); cfAction = null; };
+document.getElementById("cfYes").onclick = async () => {
+  cfModal.classList.add("hidden");
+  const act = cfAction;
+  cfAction = null;
+  if (act) await act();
+};
+
+/* ⭐ 增加议题：按钮先摆上，弹窗等阿包定 */
+document.getElementById("libAdd").onclick = () => {
+  libSub.textContent = "➕ 「增加议题」的弹窗还没做 —— 阿包说他要先想好长什么样 😌";
+};
 
 mStart.onclick = async () => {
   if (!canStart || pickedTopic === null) return;

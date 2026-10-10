@@ -644,11 +644,16 @@ _start_settings = {}          # ⭐ 阿包按下「开场」那一刻的最新�
 def start_requested() -> None:
     """阿包在界面上点了「开场」→ 让待机中的场子立刻开（人数够的话）。
 
-    ⚠️ 关键：这里必须**重新读一次配置**。settings 是服务启动时读的，而阿包可能在
-       界面上换了议题 —— 不重读的话，顶栏显示新议题、讨论却还在聊旧议题（踩过）。
+    ⚠️ 两件必须重做的事（都踩过）：
+      1. **重新读配置** —— settings 是服务启动时读的，而阿包可能刚换了议题；
+         不重读的话，顶栏显示新议题、讨论却还在聊旧的。
+      2. **重开日志文件** —— 否则会出现"文件名叫议题 1、内容却是议题 5"（日志名是启动时定的）。
     """
-    global _start_settings
+    global _start_settings, _log_path
     _start_settings = load_settings()
+    want = _start_settings["topic"]
+    if _log_path is None or want[:18] not in str(_log_path.name):
+        init_log(want)
     _start_event.set()
 
 

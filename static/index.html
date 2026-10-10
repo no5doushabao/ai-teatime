@@ -135,7 +135,7 @@
   }
   .modal.hidden { display: none; }
   .mbox {
-    width: 92%; max-width: 560px; max-height: 86vh; display: flex; flex-direction: column;
+    width: 94%; max-width: 780px; max-height: 90vh; display: flex; flex-direction: column;
     background: #212129; border: 1px solid #34343f; border-radius: 16px;
     box-shadow: 0 18px 50px rgba(0,0,0,.6); overflow: hidden;
   }
@@ -164,11 +164,17 @@
   .mfoot .hint { flex: 1; font-size: 11.5px; color: #83839a; }
   .ghost { background: #2a2a34; border: 1px solid #3a3a46; color: #c9c9d6; }
 
-  /* ⭐ 议题库 */
-  .hitem { padding: 11px 13px; margin: 6px 0; border-radius: 11px;
-           border: 1px solid #2f2f3a; background: #26262e; }
-  .hitem .ht { font-size: 13.5px; line-height: 1.55; }
-  .hitem .hm { font-size: 11.5px; color: #83839a; margin-top: 5px; }
+  /* ⭐ 议题一览 */
+  .hitem { padding: 12px 14px; margin: 7px 0; border-radius: 11px;
+           border: 1px solid #2f2f3a; background: #26262e;
+           cursor: grab; transition: background .12s, border-color .12s; }
+  .hitem:hover { background: #2d2d38; border-color: #3d4a5e; }
+  .hitem.dragging { opacity: .45; border-color: #4a7fc4; background: #2a3d5c; cursor: grabbing; }
+  .hitem .hd { display: flex; align-items: baseline; gap: 8px; }
+  .hitem .grip { color: #565668; font-size: 15px; cursor: grab; flex: 0 0 auto; }
+  .hitem .num  { color: #9ecbff; font-weight: 700; font-size: 12.5px; flex: 0 0 auto; }
+  .hitem .ht { font-size: 14px; line-height: 1.6; }
+  .hitem .hm { font-size: 12px; color: #83839a; margin-top: 6px; padding-left: 26px; }
   .hitem .done { color: #9fd39f; font-weight: 600; }
   .hitem .todo { color: #7d7d92; }
   .hitem .who  { color: #9ecbff; }
@@ -198,9 +204,9 @@
   <div class="round-badge" id="roundBadge">准备中</div>
 </header>
 
-<div id="topicBar">
-  <span>📌</span><span class="tl" id="topicText"></span>
-  <button class="mini" id="libBtn">📚 议题库</button>
+<div id="topicBar" class="on">
+  <span>📌</span><span class="tl" id="topicText">还没选议题 —— 点右下角「🍵 开场 / 换议题」挑一个</span>
+  <button class="mini" id="libBtn">📋 议题一览</button>
   <button class="mini" id="changeTopic">换议题</button>
 </div>
 
@@ -256,12 +262,12 @@
 <div id="libModal" class="modal hidden">
   <div class="mbox">
     <div class="mhead">
-      <div class="mtitle">📚 议题库</div>
+      <div class="mtitle">📋 议题一览</div>
       <div class="msub" id="libSub">正在读取…</div>
     </div>
     <div class="tlist" id="libList"></div>
     <div class="mfoot">
-      <span class="hint">议题来自 <code>topics.md</code>，改那个文件就能加题</span>
+      <span class="hint">⭐ <b>按住拖动可以排序</b>，松手即保存（写回 <code>topics.md</code>）</span>
       <button id="libClose">关闭</button>
     </div>
   </div>
@@ -336,10 +342,46 @@ function loadTopics() {
   }).catch(() => { mSub.textContent = "读不到议题（服务没起来？）"; showModal(); });
 }
 
-/* ── ⭐ 议题库（显示所有议题 + 讨论过的轮次与参与者）── */
+/* ── ⭐ 议题一览（所有议题 + 战绩 + 可拖动排序）── */
 const libModal = document.getElementById("libModal");
 const libList = document.getElementById("libList");
 const libSub = document.getElementById("libSub");
+
+function attachDnD(el) {
+  el.ondragstart = e => {
+    el.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", el.dataset.index);   // Firefox 需要
+  };
+  // ⭐ 关键：拖动预览靠**移动 DOM 节点**，不能重建列表
+  //    （重建会把正在拖的那个元素销毁掉，拖动当场中断）
+  el.ondragover = e => {
+    e.preventDefault();
+    const dragged = libList.querySelector(".dragging");
+    if (!dragged || dragged === el) return;
+    const r = el.getBoundingClientRect();
+    const after = (e.clientY - r.top) > r.height / 2;
+    libList.insertBefore(dragged, after ? el.nextSibling : el);
+  };
+  el.ondragend = async () => {
+    el.classList.remove("dragging");
+    // ⭐ DOM 顺序就是新顺序（data-index 存的是原始下标）
+    const order = [...libList.children].map(c => Number(c.dataset.index));
+    try {
+      const r = await fetch("/topics/reorder", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ order })
+      });
+      const j = await r.json();
+      libSub.textContent = j.ok ? "✅ 新顺序已保存到 topics.md"
+                                : "⚠️ 保存失败（顺序不合法？）";
+      [...libList.children].forEach((c, i) => {
+        const n = c.querySelector(".num");
+        if (n) n.textContent = (i + 1) + ".";
+      });
+    } catch (_) { libSub.textContent = "⚠️ 保存失败（服务没响应）"; }
+  };
+}
 
 function showLib() {
   libModal.classList.remove("hidden");
@@ -350,11 +392,13 @@ function showLib() {
     fetch("/history").then(r => r.json()).catch(() => ({ debates: [] }))
   ]).then(([t, h]) => {
     const debates = (h && h.debates) || [];
-    libSub.textContent = `共 ${t.topics.length} 个议题 · 已讨论 ${debates.length} 场`;
+    libSub.textContent = `共 ${t.topics.length} 个议题 · 已讨论 ${debates.length} 场 · 按住拖动可排序`;
     t.topics.forEach(tp => {
       const mine = debates.filter(d => (d.topic || "").trim() === tp.title.trim());
       const el = document.createElement("div");
       el.className = "hitem";
+      el.dataset.index = tp.index;          // ⭐ 原始下标（保存顺序要用）
+      el.draggable = true;
       let meta;
       if (mine.length) {
         const last = mine[mine.length - 1];
@@ -367,10 +411,13 @@ function showLib() {
       } else {
         meta = `<span class="todo">（还没讨论过）</span>`;
       }
-      el.innerHTML = `<div class="ht">${tp.index + 1}. ${esc(tp.title)}</div><div class="hm">${meta}</div>`;
+      el.innerHTML =
+        `<div class="hd"><span class="grip">⠿</span><span class="num">${tp.index + 1}.</span>` +
+        `<span class="ht">${esc(tp.title)}</span></div><div class="hm">${meta}</div>`;
+      attachDnD(el);
       libList.appendChild(el);
     });
-  }).catch(() => { libSub.textContent = "读不到议题库"; });
+  }).catch(() => { libSub.textContent = "读不到议题（服务没起来？）"; });
 }
 document.getElementById("libBtn").onclick = showLib;
 document.getElementById("libClose").onclick = () => libModal.classList.add("hidden");

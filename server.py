@@ -176,6 +176,34 @@ def parse_topics() -> list:
 _history_path = ROOT / "debate-history.json"
 
 
+def save_topics(order: list) -> bool:
+    """⭐ 按界面上拖出来的顺序**重写 `topics.md`**（保留每个议题的正文）。
+
+    order 必须是 0..n-1 的一个完整排列（旧下标按新位置排列），否则拒绝。
+    ⚠️ 会保留文件开头到第一个 `## ` 之前的部分（那是阿包自己写的说明），别把它冲掉。
+    """
+    items = parse_topics()
+    if not items:
+        return False
+    try:
+        idx = [int(i) for i in order]
+    except Exception:
+        return False
+    if sorted(idx) != list(range(len(items))):
+        return False
+    path = ROOT / "topics.md"
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    head = raw.split("\n## ", 1)[0].rstrip()      # ⭐ 保留开头的说明区
+    lines = [head, ""]
+    for i in idx:
+        t = items[i]
+        lines += ["", "---", "", f"## {t['title']}", ""]
+        if t["body"]:
+            lines += [t["body"], ""]
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return True
+
+
 def load_history() -> dict:
     """每场讨论的战绩。结构：
        {"debates": [{topic, topic_index, rounds_done, rounds_planned,
@@ -934,6 +962,23 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         global _chosen_topic_index
+        if self.path == "/topics/reorder":         # ⭐ 议题一览里拖动排序 → 写回 topics.md
+            n = int(self.headers.get("Content-Length", 0))
+            ok = False
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+                ok = save_topics(payload.get("order") or [])
+            except Exception:
+                ok = False
+            if ok:
+                say("system", "📋 议题顺序已更新（写回 topics.md）", "system")
+            body = json.dumps({"ok": ok}, ensure_ascii=False).encode("utf-8")
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/stop":                   # ⭐ 阿包按了「结束议题」
             stop_requested()
             self.send_response(200)

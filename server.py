@@ -145,6 +145,7 @@ def load_roster() -> list:
 
 
 _chosen_topic_index = 0          # ⭐ 阿包在界面上选的议题（0 = 第一个）
+_rounds_override = None          # ⭐ 阿包在议题框里填的「预设轮数」—— 有值就盖过 config 的 rounds
 
 
 _SEP_TAIL = re.compile(r"(?:\s*\n)*\s*-{3,}\s*$")
@@ -407,7 +408,8 @@ def load_settings() -> dict:
     idx = max(0, min(_chosen_topic_index, len(topics) - 1))
     topic = topics[idx]
     return {
-        "rounds": int(cfg.get("rounds", 12)),
+        # ⭐ 界面上的「预设轮数」优先（阿包在议题框里自己填的那个），没填才用 config
+        "rounds": _rounds_override or int(cfg.get("rounds", 12)),
         "budget_cny": float(cfg.get("budget_cny", 5.0)),
         "gap": cfg.get("gap_seconds", [2, 5]),
         # ⭐ 至少几位就绪才够开场；不够就安静待机（阿包原话："别让阿鱼一个人在里面，挺寂寞的"）
@@ -1130,7 +1132,7 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
-        global _chosen_topic_index
+        global _chosen_topic_index, _rounds_override
         if self.path == "/ask_guest":               # ⭐ 现场提问：让某位在座的 AI 提议题备选
             n = int(self.headers.get("Content-Length", 0))
             try:
@@ -1240,6 +1242,11 @@ class Handler(SimpleHTTPRequestHandler):
             if isinstance(payload.get("topic_index"), int):
                 _chosen_topic_index = max(0, int(payload["topic_index"]))
                 say("system", f"📌 阿包选定了议题 {_chosen_topic_index + 1}：{load_settings()['topic']}", "system")
+            # ⭐ 预设轮数（议题框里那个小输入框）：有值就盖过 config 的 rounds
+            _r = payload.get("rounds")
+            if isinstance(_r, int) and not isinstance(_r, bool):
+                _rounds_override = max(1, min(99, int(_r)))
+                say("system", f"🔢 本场预设轮数：{_rounds_override} 轮", "system")
             start_requested()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

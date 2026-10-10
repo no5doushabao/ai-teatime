@@ -171,6 +171,13 @@
            text-align: center; border-top: 1px dashed #33333f; }
   .mfoot { padding: 12px 20px 18px; display: flex; gap: 10px; align-items: center; }
   .mfoot .hint { flex: 1; font-size: 11.5px; color: #83839a; }
+  /* ⭐ 「预设轮数」：阿包自己定这场讨论跑多久 */
+  .mfoot .rn { font-size: 11.5px; color: #83839a; white-space: nowrap; }
+  .mfoot .rnin {
+    width: 44px; padding: 3px 6px; font-size: 12px; text-align: center;
+    background: #1b1f2a; color: #d7dde8; border: 1px solid #3a4256; border-radius: 8px;
+  }
+  .mfoot .rnin:focus { outline: none; border-color: #5b7bb5; }
   .ghost { background: #2a2a34; border: 1px solid #3a3a46; color: #c9c9d6; }
 
   /* ⭐ 议题整理 */
@@ -288,6 +295,9 @@
     <div class="tlist" id="topicList"></div>
     <div class="mfoot">
       <span class="hint" id="mHint"></span>
+      <label class="rn" for="roundsInput">预设轮数</label>
+      <input class="rnin" id="roundsInput" type="number" min="1" max="99" step="1" value="10"
+             title="这场讨论跑多少轮（1~99）">
       <button class="ghost" id="mClose">先不开始</button>
       <button id="mStart" disabled>开始讨论</button>
     </div>
@@ -738,6 +748,16 @@ async function addCandidate(title, reason, author, btn) {
 /* ⭐ 议题整理的「增加议题」入口 */
 document.getElementById("libAdd").onclick = showAdd;
 
+/* ⭐ 「预设轮数」：阿包自己定这场讨论跑多久（默认 10 轮 / 1~99） */
+const roundsInput = document.getElementById("roundsInput");
+function readRounds() {
+  let n = parseInt(roundsInput.value, 10);
+  if (!Number.isFinite(n)) n = 10;
+  n = Math.max(1, Math.min(99, n));
+  roundsInput.value = n;          // ⭐ 回写：让他看到真正会用上的那个值（输入 999 会被按回 99）
+  return n;
+}
+
 mStart.onclick = async () => {
   if (!canStart || pickedTopic === null) return;
   const t = topicList.querySelector(`.titem[data-index="${pickedTopic}"] .tt`);
@@ -749,7 +769,7 @@ mStart.onclick = async () => {
   await fetch("/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ topic_index: pickedTopic })
+    body: JSON.stringify({ topic_index: pickedTopic, rounds: readRounds() })
   });
 };
 document.getElementById("mClose").onclick = hideModal;

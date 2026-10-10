@@ -172,6 +172,20 @@
   .hitem .done { color: #9fd39f; font-weight: 600; }
   .hitem .todo { color: #7d7d92; }
   .hitem .who  { color: #9ecbff; }
+
+  /* ⭐ 最终会议纪要（阿鱼整理的那份大总结） */
+  .summary {
+    margin: 18px 0; padding: 16px 18px; border-radius: 14px;
+    background: linear-gradient(180deg, rgba(70,90,130,.28), rgba(45,60,90,.22));
+    border: 1px solid #4a6fa5; font-size: 13.5px; color: #dfe8f5;
+    white-space: pre-wrap; line-height: 1.85; box-shadow: 0 4px 18px rgba(0,0,0,.35);
+  }
+  .summary .sh {
+    font-weight: 700; color: #9ecbff; margin-bottom: 10px; font-size: 14px;
+    padding-bottom: 8px; border-bottom: 1px solid #35507a;
+  }
+  /* ⭐ 结束议题的询问条（做成一条"阿鱼在问你"的卡片） */
+  .askbox .mhead { border-bottom: 1px solid #2f2f3a; margin-bottom: 4px; }
 </style>
 </head>
 <body>
@@ -196,6 +210,7 @@
   <div class="seat">
     <span>💬 旁听席（你）—— 说的话会进下一轮，大家都会看到</span>
     <span class="sp"></span>
+    <button id="stopBtn" class="mini">🛑 结束议题</button>
     <button id="startBtn" class="mini">🍵 开场 / 换议题</button>
   </div>
   <div class="inputbar">
@@ -216,6 +231,23 @@
       <span class="hint" id="mHint"></span>
       <button class="ghost" id="mClose">先不开始</button>
       <button id="mStart" disabled>开始讨论</button>
+    </div>
+  </div>
+</div>
+
+<!-- ⭐ 结束议题后，阿鱼来问一句 -->
+<div id="askModal" class="modal hidden">
+  <div class="mbox askbox" style="max-width:420px">
+    <div class="mhead">
+      <div class="mtitle">🛑 讨论结束了</div>
+      <div class="msub" style="font-size:13px;color:#c9d6e8;line-height:1.7">
+        <b>阿鱼：</b>要我把这场讨论整理成一份会议纪要吗？<br>
+        <span style="color:#8b8b9c">（会汇总各方立场、关键交锋和没结论的问题，存进本场记录里）</span>
+      </div>
+    </div>
+    <div class="mfoot" style="justify-content:flex-end">
+      <button class="ghost" id="askNo">不用了</button>
+      <button id="askYes">需要，帮我整理</button>
     </div>
   </div>
 </div>
@@ -361,6 +393,18 @@ document.getElementById("mClose").onclick = hideModal;
 document.getElementById("changeTopic").onclick = showModal;
 document.getElementById("startBtn").onclick = showModal;
 
+/* ── ⭐ 结束议题：停 → 问阿鱼要不要整理 ── */
+const askModal = document.getElementById("askModal");
+document.getElementById("stopBtn").onclick = async () => {
+  await fetch("/stop", { method: "POST" });
+  askModal.classList.remove("hidden");        // ⭐ 停完立刻问一句
+};
+document.getElementById("askYes").onclick = async () => {
+  askModal.classList.add("hidden");
+  await fetch("/summarize", { method: "POST" });   // 阿鱼去整理，结果走 SSE 推回来
+};
+document.getElementById("askNo").onclick = () => askModal.classList.add("hidden");
+
 /* ── 消息渲染 ── */
 const LONG = 260;        // ⭐ 超过这个字数就折叠，免得一场讨论刷出几千行
 
@@ -393,7 +437,16 @@ function addMsg(m) {
     flow.scrollTop = flow.scrollHeight;
     return;
   }
-  // ⭐ 会议纪要（公用历史框）单独做成卡片
+  // ⭐ 最终会议纪要（阿鱼整理的那份大总结）—— 单独的大卡片
+  if (m.kind === "summary") {
+    const d = document.createElement("div");
+    d.className = "summary";
+    d.innerHTML = `<div class="sh">📝 会议纪要 · 阿鱼整理</div>${esc(m.text)}`;
+    flow.appendChild(d);
+    flow.scrollTop = flow.scrollHeight;
+    return;
+  }
+  // ⭐ 每轮的小纪要（公用历史框）单独做成卡片
   if (m.kind === "system" && (m.text || "").startsWith("📝")) {
     const d = document.createElement("div");
     d.className = "notes";

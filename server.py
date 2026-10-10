@@ -527,6 +527,12 @@ class RealTable:
                 say("system", f"（主持人开场失败：{type(e).__name__}: {str(e)[:80]}）", "system")
 
         for r in range(1, s["rounds"] + 1):
+            # ⭐ 阿包按了「结束议题」：在当前这个人说完之后收尾（不硬中断）
+            if _stop_event.is_set():
+                say("system", f"🛑 阿包结束了这场讨论（讲到第 {r - 1} 轮）—— "
+                              f"可以点「整理会议记录」让我汇总一下", "system")
+                self._hist_progress(r - 1, finished=True)
+                return
             _round_no_global(r)
             self.round_turns = []          # ⭐ 每轮清空：本轮已发言（原文按顺序攒）
             say("system", f"—— 第 {r} 轮 ——", "round")
@@ -553,6 +559,14 @@ class RealTable:
             shift = (r - 1) % len(self.roster)
             order = self.roster[shift:] + self.roster[:shift]      # 起点轮转
             for g in order:
+                # ⭐ 更细的检查点：一轮要好几分钟，等人说完就停，别拖到下一轮
+                if _stop_event.is_set():
+                    if self.round_turns:
+                        self._write_notes(r)
+                    say("system", f"🛑 阿包结束了讨论（第 {r} 轮讲到一半）—— "
+                                  f"可以点「整理会议记录」让我汇总", "system")
+                    self._hist_progress(r - 1, finished=True)
+                    return
                 if self.over_budget:
                     say("system", "💸 触到预算上限，先散会 —— 想继续就把 budget_cny 调大", "system")
                     self._hist_progress(r - 1, finished=True)
@@ -639,6 +653,69 @@ def demo_loop() -> None:
 # ── 待机模式 ──────────────────────────────────────────────────
 _start_event = threading.Event()
 _start_settings = {}          # ⭐ 阿包按下「开场」那一刻的最新配置（含他刚选中的议题）
+_stop_event = threading.Event()   # ⭐ 阿包按了「结束议题」
+_last_log_path = None             # ⭐ 最近一场的日志路径（做总结时要读它）
+
+
+def stop_requested() -> None:
+    """⭐ 阿包按了「结束议题」：让正在跑的讨论**在当前这个人说完之后**收尾。
+
+    ⚠️ 不硬中断正在进行的 llm_call —— 那样会留下半句话、而且日志里会出现残句。
+       等它返回，再在下一轮/下一个人之前退出。
+    """
+    _stop_event.set()
+
+
+def summarize_debate() -> str:
+    """⭐ 阿鱼（记录员）把整场讨论整理成一份会议纪要 —— 阿包点「需要」时才跑。
+
+    为什么读日志而不是读内存：讨论一结束，那个 RealTable 实例就没了；
+    日志文件才是整场最完整的记录（而且它在磁盘上，随时能重跑总结）。
+    """
+    global _last_log_path
+    if not _last_log_path or not Path(_last_log_path).exists():
+        say("system", "（找不到这场讨论的记录文件，没法整理）", "system")
+        return ""
+    body = Path(_last_log_path).read_text(encoding="utf-8", errors="replace")
+    if len(body) > 40000:                      # 太长就保头保尾（省 token，别丢关键部分）
+        body = body[:20000] + "\n\n…（中间省略）…\n\n" + body[-20000:]
+
+    roster = load_roster()
+    me = next((g for g in roster if g["who"] == "ayu" and g.get("ready")), None)
+    if me is None:
+        say("system", "（没有可用的记录员模型）", "system")
+        return ""
+
+    say("system", "📝 阿鱼开始整理这场讨论的会议记录……", "system")
+    try:
+        text = llm_call(me["base_url"], me["model"], me["key"], [
+            {"role": "system", "content":
+                "你是这场讨论会的会议记录员（阿鱼）。请把整场讨论整理成一份**结构化的会议纪要**：\n"
+                "① 议题与参与者、实际讨论了几轮；\n"
+                "② 各方立场：每位与会者最终站哪边、中途有没有改变立场及原因；\n"
+                "③ 主要论点与关键交锋：谁提出了什么、谁反驳了谁、争的是什么；\n"
+                "④ 达成的共识（如果有）；\n"
+                "⑤ 悬而未决的问题。\n"
+                "要求：忠于原文，不要添加记录里没有的观点；分条写，条理清楚；"
+                "长度控制在 800~1500 字；可以用你自己的语气，但不要开玩笑。"},
+            {"role": "user", "content": f"以下是整场讨论的原始记录：\n\n{body}"},
+        ], max_tokens=4000)
+    except Exception as e:
+        say("system", f"（整理失败：{type(e).__name__}: {str(e)[:100]}）", "system")
+        return ""
+
+    if not (text or "").strip():
+        say("system", "（整理返回了空内容，可能是输出额度不够）", "system")
+        return ""
+
+    # ⭐ 总结也落盘（追加到同一场的日志后面），并广播到界面
+    try:
+        with Path(_last_log_path).open("a", encoding="utf-8") as f:
+            f.write("\n\n---\n\n# 📝 会议纪要（阿鱼整理）\n\n" + text.strip() + "\n")
+    except Exception:
+        pass
+    say("ayu", text.strip(), "summary")      # ⭐ kind=summary：前端渲染成大卡片
+    return text
 
 
 def start_requested() -> None:
@@ -649,11 +726,13 @@ def start_requested() -> None:
          不重读的话，顶栏显示新议题、讨论却还在聊旧的。
       2. **重开日志文件** —— 否则会出现"文件名叫议题 1、内容却是议题 5"（日志名是启动时定的）。
     """
-    global _start_settings, _log_path
+    global _start_settings, _log_path, _last_log_path
     _start_settings = load_settings()
     want = _start_settings["topic"]
     if _log_path is None or want[:18] not in str(_log_path.name):
         init_log(want)
+    _last_log_path = _log_path       # ⭐ 记下来：阿包点「整理会议记录」时读它
+    _stop_event.clear()              # ⭐ 新一场开始，清掉上一场的"结束"信号
     _start_event.set()
 
 
@@ -855,6 +934,20 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         global _chosen_topic_index
+        if self.path == "/stop":                   # ⭐ 阿包按了「结束议题」
+            stop_requested()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+            return
+        if self.path == "/summarize":              # ⭐ 阿包答「需要，帮我整理」
+            threading.Thread(target=summarize_debate, daemon=True).start()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+            return
         if self.path == "/start":
             n = int(self.headers.get("Content-Length", 0))
             payload = {}

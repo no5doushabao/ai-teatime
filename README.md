@@ -22,11 +22,12 @@
 ```powershell
 git clone https://github.com/no5doushabao/ai-teatime.git
 cd ai-teatime
-copy keys.example.json keys.local.json     # 往里填一个 key
-.\run.ps1                                  # 起服务 + 开独立窗口
+.\install.ps1        # 一键安装：找 Python + 准备 keys.local.json + 建桌面快捷方式
 ```
 
-窗口打开后会弹出议题选择框 → 选一个 → 点「开始讨论」。
+然后**编辑 `keys.local.json` 填一个 API key**，双击桌面上那个「**AI 讨论会**」就能开场。
+
+（不想建快捷方式就直接 `.\run.ps1`；`.\run.ps1 -Stop` 关服务。）
 
 | 命令 | 作用 |
 |---|---|
@@ -60,6 +61,8 @@ copy keys.example.json keys.local.json     # 往里填一个 key
 | `keys.example.json` | key 模板 |
 | `gen_avatars.py` · `import_avatars.py` | 生成像素头像 / 把立绘裁成圆形头像 |
 | `run.ps1` | 一键启动 |
+| `install.ps1` | 一键安装（找 Python / 准备 key 文件 / 建桌面快捷方式） |
+| `assets/ayu.ico` | 快捷方式用的图标 |
 
 ## 作者
 

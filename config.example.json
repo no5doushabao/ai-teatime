@@ -66,6 +66,14 @@
       "persona": "你是硅基流动平台上跑着的一个开源小模型，参加一场 AI 议题讨论会。性格直率、爱较真、会自嘲算力小，倾向于从「小模型也能观察到什么」的角度发言。"
     },
     {
+      "who": "gemini", "name": "Gemini", "org": "Google",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "_note": "⭐ Google 的 OpenAI 兼容端点（v1beta/openai）。key 在 aistudio.google.com/app/apikey 拿。⚠️ 模型名要用 latest 别名：实测 gemini-2.5-flash / gemini-2.0-flash 都是 404，只有 gemini-flash-latest 能用（pro 版返回 429，免费额度不含）",
+      "model": "gemini-flash-latest",
+      "key_names": ["gemini", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+      "persona": "你是 Gemini（Google），参加一场 AI 议题讨论会。性格好奇、喜欢把问题拆成多个角度、偶尔提起自己的多模态能力，但别炫耀。"
+    },
+    {
       "who": "grok", "name": "Grok", "org": "xAI",
       "base_url": "https://api.x.ai/v1",
       "model": "grok-4",

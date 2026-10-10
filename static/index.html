@@ -178,6 +178,43 @@
     background: #1b1f2a; color: #d7dde8; border: 1px solid #3a4256; border-radius: 8px;
   }
   .mfoot .rnin:focus { outline: none; border-color: #5b7bb5; }
+
+  /* ── ⭐ 参会者一览：点头像 → 拖滑块调这位 AI 的「思考用量」── */
+  .rbox { width: 540px; }
+  .rgrid { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 20px 12px; }
+  .rcard {
+    width: 84px; padding: 9px 4px 7px; border-radius: 12px; cursor: pointer;
+    text-align: center; border: 1px solid transparent;
+  }
+  .rcard:hover { background: #232330; }
+  .rcard.on { background: #222b3d; border-color: #4a6ea8; }
+  .rcard img {
+    width: 46px; height: 46px; border-radius: 50%; image-rendering: pixelated;
+    background: #26262e; border: 2px solid #2f2f3a; display: block; margin: 0 auto;
+  }
+  .rcard.on img { border-color: #5b7bb5; }
+  .rcard b {
+    display: block; font-size: 11.5px; font-weight: 400; color: #c9c9d6;
+    margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .rcard i { display: block; font-size: 10px; font-style: normal; color: #7c7c93; margin-top: 1px; }
+  .rpanel { padding: 12px 20px 4px; border-top: 1px solid #2f2f3a; }
+  .rrow { display: flex; align-items: center; gap: 12px; }
+  .rrow .rtag { font-size: 11.5px; color: #83839a; white-space: nowrap; }
+  .rrow input[type=range] { flex: 1; accent-color: #5b7bb5; cursor: pointer; }
+  .rrow input[type=range]:disabled { opacity: .35; cursor: default; }
+  .rrow .rval {
+    font-size: 12.5px; color: #9ecbff; min-width: 78px; text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .rchk {
+    display: flex; align-items: center; gap: 7px; margin-top: 12px; width: fit-content;
+    font-size: 12px; color: #c9c9d6; cursor: pointer;
+  }
+  .rwarn {
+    margin-top: 9px; padding: 8px 11px; border-radius: 8px; line-height: 1.6;
+    font-size: 12px; color: #ff9b9b; background: #3a1f24; border: 1px solid #6b2f38;
+  }
   .ghost { background: #2a2a34; border: 1px solid #3a3a46; color: #c9c9d6; }
 
   /* ⭐ 议题整理 */
@@ -268,6 +305,7 @@
 <div id="topicBar" class="on">
   <span>📌</span><span class="tl" id="topicText">还没选议题 —— 点「🍵 开场 / 换议题」挑一个</span>
   <button class="mini" id="libBtn">📋 议题整理</button>
+  <button class="mini" id="rosterBtn">👥 参会者一览</button>
   <button class="mini" id="changeTopic">🍵 开场 / 换议题</button>
 </div>
 
@@ -385,6 +423,30 @@
       <span class="hint">⭐ <b>按住拖动可以排序</b>，松手即保存（写回 <code>topics.md</code>）</span>
       <button class="ghost" id="libAdd">➕ 增加议题</button>
       <button id="libClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ⭐ 参会者一览：只列**已连接**的嘉宾；点头像 → 调它的「思考用量」 -->
+<div id="rosterModal" class="modal hidden">
+  <div class="mbox rbox">
+    <div class="mhead">
+      <div class="mtitle">👥 参会者一览</div>
+      <div class="msub" id="rSub">正在读取…</div>
+    </div>
+    <div class="rgrid" id="rGrid"></div>
+    <div class="rpanel hidden" id="rPanel">
+      <div class="rrow">
+        <span class="rtag">思考用量</span>
+        <input type="range" id="rRange" min="1000" max="16000" step="100" value="1200">
+        <span class="rval" id="rVal">1200</span>
+      </div>
+      <label class="rchk"><input type="checkbox" id="rUnlimited"> 不限制</label>
+      <div class="rwarn hidden" id="rWarn">⚠️ 注意！勾选了不限制，该AI可能会吃光你的TOKEN！！</div>
+    </div>
+    <div class="mfoot">
+      <span class="hint" id="rHint">点头像 → 拖滑块，调这位 AI 的思考用量</span>
+      <button id="rClose">关闭</button>
     </div>
   </div>
 </div>
@@ -891,6 +953,109 @@ document.getElementById("send").onclick = send;
 document.getElementById("msg").addEventListener("keydown", e => {
   if (e.key === "Enter") send();
 });
+
+/* ⭐ 参会者一览：点头像 → 拖滑块调这位 AI 的「思考用量」（阿包 2026-10-11 要求）
+   · 滑块像音量条一样**连续可调**（1000~16000，不设死档位）
+   · 「不限制」是个单选框 —— 勾上 = 压根不传 max_tokens，让模型自己决定
+   · 拖动时只更新数字，**松手才发请求**（不然拖一次发几十个请求） */
+const rosterModal = document.getElementById("rosterModal");
+const rGrid = document.getElementById("rGrid");
+const rPanel = document.getElementById("rPanel");
+const rRange = document.getElementById("rRange");
+const rVal = document.getElementById("rVal");
+const rUnlimited = document.getElementById("rUnlimited");
+const rWarn = document.getElementById("rWarn");
+const rSub = document.getElementById("rSub");
+const rHint = document.getElementById("rHint");
+let rPicked = null;        // 当前选中的是谁
+let rBudgets = {};         // who -> tokens（0 = 不限制；没有这条 = 跟随 config 默认）
+let rDefault = 1200;
+
+function rSave(who, tokens) {
+  return fetch("/think_budget", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ who: who, tokens: tokens })
+  }).then(r => r.json()).catch(() => ({ ok: false }));
+}
+
+function rPaint() {                       // 把当前设置画到控件上
+  const v = rBudgets[rPicked];
+  const unlimited = (v === 0);
+  rUnlimited.checked = unlimited;
+  rRange.disabled = unlimited;            // 勾了不限制，滑块就该灰掉
+  if (unlimited) {
+    rVal.textContent = "不限制";
+  } else {
+    const n = (v === undefined || v === null) ? rDefault : v;
+    rRange.value = n;
+    rVal.textContent = (v === undefined ? n + "（默认）" : String(n));
+  }
+  rWarn.classList.toggle("hidden", !unlimited);
+}
+
+function rSelect(who) {
+  rPicked = who;
+  [...rGrid.children].forEach(c => c.classList.toggle("on", c.dataset.who === who));
+  rPanel.classList.remove("hidden");
+  rPaint();
+}
+
+async function openRoster() {
+  rosterModal.classList.remove("hidden");
+  rSub.textContent = "正在读取…";
+  try {
+    const [ro, tb] = await Promise.all([
+      fetch("/roster").then(r => r.json()),
+      fetch("/think_budget").then(r => r.json()),
+    ]);
+    const ready = (ro.guests || []).filter(g => g.ready);   // ⭐ 只列**已连接**的
+    rBudgets = tb.budgets || {};
+    rDefault = tb.default || 1200;
+    if (tb.min) rRange.min = tb.min;
+    if (tb.max) rRange.max = tb.max;
+    rGrid.innerHTML = "";
+    ready.forEach(g => {
+      const d = document.createElement("div");
+      d.className = "rcard";
+      d.dataset.who = g.who;
+      d.innerHTML = `<img src="/avatars/${esc(g.who)}.png" alt="${esc(g.name)}">` +
+                    `<b>${esc(g.name)}</b><i>${esc(g.org || "")}</i>`;
+      d.onclick = () => rSelect(g.who);
+      rGrid.appendChild(d);
+    });
+    rSub.textContent = `已连接 ${ready.length} 位 · 点头像就能调它的思考用量`;
+    rHint.textContent = "⚠️ 思考用量 = 它的「思考 + 发言」总预算（推理模型这两者共用一份）";
+    if (ready.length) {
+      rSelect(ready[0].who);
+    } else {
+      rPanel.classList.add("hidden");
+      rSub.textContent = "现在一个都没连上 —— 去 keys.local.json 配个 key 吧";
+    }
+  } catch (e) {
+    rSub.textContent = "读取失败：" + e;
+  }
+}
+
+rRange.addEventListener("input", () => {          // 拖动中：只动数字
+  if (rPicked && !rRange.disabled) rVal.textContent = rRange.value;
+});
+rRange.addEventListener("change", async () => {   // 松手：才落盘
+  if (!rPicked) return;
+  const n = parseInt(rRange.value, 10);
+  const j = await rSave(rPicked, n);
+  if (j.ok) { rBudgets[rPicked] = n; rPaint(); }
+  else { rSub.textContent = "⚠️ 保存失败 —— 服务还在跑吗？"; }
+});
+rUnlimited.addEventListener("change", async () => {
+  if (!rPicked) return;
+  const want = rUnlimited.checked ? 0 : parseInt(rRange.value, 10);
+  const j = await rSave(rPicked, want);
+  if (j.ok) { rBudgets[rPicked] = want; rPaint(); }
+  else { rSub.textContent = "⚠️ 保存失败 —— 服务还在跑吗？"; }
+});
+document.getElementById("rosterBtn").onclick = openRoster;
+document.getElementById("rClose").onclick = () => rosterModal.classList.add("hidden");
 
 /* ⭐ 打开窗口就弹议题选择（阿包 2026-10-10 的要求） */
 loadTopics();

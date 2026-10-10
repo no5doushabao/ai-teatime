@@ -144,6 +144,65 @@ def load_roster() -> list:
     return out
 
 
+# ── ⭐ 每位嘉宾的「思考用量」（阿包 2026-10-11 加的：参会者一览里拖滑块）────
+#    值 = 该嘉宾单次发言的 max_tokens；**0 = 不限制**（压根不传这个参数，让模型自己决定）；
+#    不在表里 = 用 config 里的全局默认（debate.max_tokens）。
+#    ⚠️ 对推理模型（GPT-5 / Gemini）来说，"思考 token"和正文**共用**这一份额度 ——
+#       所以这个数就是"它能思考多久 + 能说多少"的总预算，不是单纯的输出上限。
+THINK_MIN, THINK_MAX = 1000, 16000
+_think_budget = {}
+
+
+def _think_path() -> Path:
+    return ROOT / "think-budget.json"
+
+
+def load_think_budget() -> dict:
+    """读 `think-budget.json`（不存在 / 内容坏了都当空表，绝不抛）。"""
+    global _think_budget
+    _think_budget = {}
+    try:
+        d = json.loads(_think_path().read_text(encoding="utf-8"))
+        if isinstance(d, dict):
+            _think_budget = {str(k): int(v) for k, v in d.items()
+                             if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    except Exception:
+        pass
+    return _think_budget
+
+
+def save_think_budget() -> bool:
+    try:
+        _think_path().write_text(
+            json.dumps(_think_budget, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def set_think_budget(who: str, tokens) -> bool:
+    """设一位嘉宾的预算。tokens=0 → 不限制；None → 删掉这条（回落到 config 默认）。"""
+    if not who:
+        return False
+    if tokens is None:
+        _think_budget.pop(who, None)
+    else:
+        t = int(tokens)
+        _think_budget[who] = 0 if t <= 0 else max(THINK_MIN, min(THINK_MAX, t))
+    return save_think_budget()
+
+
+def think_budget_for(who: str, default):
+    """算这位嘉宾这次发言的 max_tokens → int，或 **None = 不限制**（llm_call 收到 None 就不传）。"""
+    v = _think_budget.get(who)
+    if v == 0:
+        return None                      # ⭐ 不限制
+    return int(v) if v else default
+
+
+load_think_budget()                      # 启动就读一次
+
+
 _chosen_topic_index = 0          # ⭐ 阿包在界面上选的议题（0 = 第一个）
 _rounds_override = None          # ⭐ 阿包在议题框里填的「预设轮数」—— 有值就盖过 config 的 rounds
 
@@ -671,14 +730,17 @@ class RealTable:
         messages = [{"role": "system", "content": sys_prompt},
                     {"role": "user", "content": user}]
         self.spent_tokens += rough_tokens(sys_prompt) + rough_tokens(user)
+        # ⭐ 思考用量**按人取**：在「参会者一览」里拖过的用它自己的，没拖过用 config 默认；
+        #    返回 None = 那位被勾了"不限制"（llm_call 收到 None 就压根不传 max_tokens）
+        mt = think_budget_for(guest["who"], s.get("max_tokens") or None)
         text = llm_call(guest["base_url"], guest["model"], guest["key"], messages,
-                        max_tokens=s.get("max_tokens") or None)
+                        max_tokens=mt)
         # ⭐ 2026-10-10：推理模型（GPT-5 等）的"思考 token"会吃光 max_tokens → 返回空串。
         #    以前这种空回复不报错，界面上就成了"卡住不出声"。现在：重试一次更大预算 + 兜底提示。
         if not (text or "").strip():
             try:
                 text = llm_call(guest["base_url"], guest["model"], guest["key"], messages,
-                                max_tokens=int(s.get("max_tokens", 1200)) * 3)
+                                max_tokens=(mt * 3 if mt else None))
             except Exception:
                 text = ""
         if not (text or "").strip():
@@ -1181,6 +1243,17 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/think_budget":           # ⭐ 参会者一览：各位的思考用量
+            body = json.dumps({"budgets": _think_budget,
+                               "default": load_settings()["max_tokens"],
+                               "min": THINK_MIN, "max": THINK_MAX},
+                              ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/":
             self.path = "/index.html"
         return super().do_GET()
@@ -1306,6 +1379,30 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"ok":true}')
+            return
+        if self.path == "/think_budget":           # ⭐ 参会者一览：调某位的思考用量
+            n = int(self.headers.get("Content-Length", 0))
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                payload = {}
+            who = str(payload.get("who") or "")
+            tok = payload.get("tokens")
+            if tok is not None:
+                try:
+                    tok = int(tok)
+                except Exception:
+                    tok = None
+            # ⚠️ 这里**故意不 say** —— 拖滑块会来好几个请求，播报会把讨论流刷花。
+            #    改了什么看 think-budget.json / 界面上滑块旁的数字就行。
+            ok = set_think_budget(who, tok)
+            body = json.dumps({"ok": ok, "budgets": _think_budget},
+                              ensure_ascii=False).encode("utf-8")
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if self.path != "/say":
             self.send_error(404)

@@ -258,7 +258,7 @@
 </header>
 
 <div id="topicBar" class="on">
-  <span>📌</span><span class="tl" id="topicText">还没选议题 —— 点右下角「🍵 开场 / 换议题」挑一个</span>
+  <span>📌</span><span class="tl" id="topicText">还没选议题 —— 点「换议题」挑一个</span>
   <button class="mini" id="libBtn">📋 议题整理</button>
   <button class="mini" id="changeTopic">换议题</button>
 </div>
@@ -270,7 +270,6 @@
     <span>💬 旁听席（你）—— 说的话会进下一轮，大家都会看到</span>
     <span class="sp"></span>
     <button id="stopBtn" class="mini">🛑 结束议题</button>
-    <button id="startBtn" class="mini">🍵 开场 / 换议题</button>
   </div>
   <div class="inputbar">
     <input id="msg" placeholder="说点什么…（Enter 发送）" autocomplete="off">
@@ -756,7 +755,6 @@ document.getElementById("mClose").onclick = hideModal;
 // ⭐ 每次点开都重新读一遍议题 —— 以前只绑 showModal()，所以在「议题整理」里
 //    拖完顺序、加完议题，这里看到的还是开屏那一刻的旧列表（阿包发现的）
 document.getElementById("changeTopic").onclick = loadTopics;
-document.getElementById("startBtn").onclick = loadTopics;
 
 /* ── ⭐ 结束议题：停 → 问阿鱼要不要整理 ── */
 const askModal = document.getElementById("askModal");

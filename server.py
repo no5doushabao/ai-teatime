@@ -918,7 +918,7 @@ def idle_loop(roster: list, settings: dict) -> None:
     names = "、".join(g["name"] for g in ready) or "（空场）"
     say("system", f"🍵 讨论会待机中 · 在场：{names}　就绪 {len(ready)}/{settings['min_guests']} 位", "system")
     say("system", f"本次议题：{settings['topic']}", "system")
-    say("system", "点左下角「🍵 开场」开始讨论；也可以直接说话，在场的会回你", "system")
+    say("system", "点上方「换议题」挑一个就能开始；也可以直接说话，在场的会回你", "system")
 
     while True:
         if _start_event.is_set() and len(ready) >= settings["min_guests"]:
@@ -1269,7 +1269,7 @@ def main() -> None:
             demo_loop()
             return
         # ⭐ 默认**不自动开场**（阿包 10-10 喊停过服务 → 不想它自己烧额度）：
-        #    双击启动器只是"支起场子"，想讨论时点界面左下角的「🍵 开场」。
+        #    双击启动器只是"支起场子"，想讨论时点界面上方的「换议题」。
         #    想恢复"人齐就自动开始" → config 里把 auto_start 设成 true。
         if (not settings["auto_start"]) or len(ready) < settings["min_guests"]:
             idle_loop(roster, settings)

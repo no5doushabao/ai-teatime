@@ -134,8 +134,8 @@
     backdrop-filter: blur(3px); z-index: 50; animation: pop .2s ease-out;
   }
   .modal.hidden { display: none; }
-  /* ⭐ 叠在别的弹窗之上的弹窗（确认框、增加议题）—— 它们是从议题一览里点出来的，
-     而议题一览在 DOM 里排在后面，不给更高层级就会被盖住（踩过） */
+  /* ⭐ 叠在别的弹窗之上的弹窗（确认框、增加议题）—— 它们是从议题整理里点出来的，
+     而议题整理在 DOM 里排在后面，不给更高层级就会被盖住（踩过） */
   .modal.top { z-index: 120; }
   .mbox {
     width: 94%; max-width: 780px; max-height: 90vh; display: flex; flex-direction: column;
@@ -163,11 +163,16 @@
   .titem .tt { font-size: 13.5px; line-height: 1.55; }
   .titem .tb { font-size: 11.5px; color: #83839a; margin-top: 3px;
                overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .titem .done { color: #9fd39f; }
+  .titem .who  { color: #9ecbff; }
+  .titem .todo { color: #7d7d92; }
+  .tmore { font-size: 12px; color: #8b9ab0; padding: 10px 12px; margin-top: 6px;
+           text-align: center; border-top: 1px dashed #33333f; }
   .mfoot { padding: 12px 20px 18px; display: flex; gap: 10px; align-items: center; }
   .mfoot .hint { flex: 1; font-size: 11.5px; color: #83839a; }
   .ghost { background: #2a2a34; border: 1px solid #3a3a46; color: #c9c9d6; }
 
-  /* ⭐ 议题一览 */
+  /* ⭐ 议题整理 */
   .hitem { padding: 12px 14px; margin: 7px 0; border-radius: 11px;
            border: 1px solid #2f2f3a; background: #26262e;
            cursor: grab; transition: background .12s, border-color .12s; }
@@ -254,7 +259,7 @@
 
 <div id="topicBar" class="on">
   <span>📌</span><span class="tl" id="topicText">还没选议题 —— 点右下角「🍵 开场 / 换议题」挑一个</span>
-  <button class="mini" id="libBtn">📋 议题一览</button>
+  <button class="mini" id="libBtn">📋 议题整理</button>
   <button class="mini" id="changeTopic">换议题</button>
 </div>
 
@@ -294,7 +299,7 @@
   <div class="mbox" style="max-width:600px">
     <div class="mhead">
       <div class="mtitle">➕ 增加议题</div>
-      <div class="msub">加完会出现在议题一览的最后，位置可以拖动调整</div>
+      <div class="msub">加完会出现在议题整理的末尾，顺序可以拖动调整</div>
     </div>
     <div class="abody">
       <label for="addTitle">议题题目</label>
@@ -303,7 +308,7 @@
       <textarea id="addReason" placeholder="为什么想聊这个？希望听到什么？有什么背景可以交代？"></textarea>
       <label for="addAuthor">由谁提供</label>
       <input id="addAuthor" placeholder="你自己的名字，或某个 AI 的名字" autocomplete="off" maxlength="24">
-      <div class="tip">留空也行 —— 议题一览里会显示「（未标注）」</div>
+      <div class="tip">留空也行 —— 议题整理里会显示「（未标注）」</div>
       <div class="errtxt" id="addErr"></div>
 
       <!-- ⭐ 现场提问：点了按钮才展开 -->
@@ -362,7 +367,7 @@
 <div id="libModal" class="modal hidden">
   <div class="mbox">
     <div class="mhead">
-      <div class="mtitle">📋 议题一览</div>
+      <div class="mtitle">📋 议题整理</div>
       <div class="msub" id="libSub">正在读取…</div>
     </div>
     <div class="tlist" id="libList"></div>
@@ -416,20 +421,36 @@ const mStart = document.getElementById("mStart");
 function showModal() { modal.classList.remove("hidden"); }
 function hideModal() { modal.classList.add("hidden"); }
 
+const TOPIC_SHOW_MAX = 5;   // ⭐ 「换议题」只显示前 5 个，更多请去「议题整理」
+
 function loadTopics() {
-  fetch("/topics").then(r => r.json()).then(d => {
+  // ⭐ 每次都重新读（以前只在开屏读一次，所以在议题整理里拖完序，这里还是旧顺序）
+  Promise.all([
+    fetch("/topics").then(r => r.json()),
+    fetch("/history").then(r => r.json()).catch(() => ({ debates: [] }))
+  ]).then(([d, h]) => {
+    const debates = (h && h.debates) || [];
     topicList.innerHTML = "";
     const n = d.topics.length;
-    mSub.textContent = `共 ${n} 个议题 · 在场 ${d.ready} 位（至少 ${d.min_guests} 位可开场）`;
+    const shown = d.topics.slice(0, TOPIC_SHOW_MAX);
     canStart = d.ready >= d.min_guests;
+    mSub.textContent = `共 ${n} 个议题 · 在场 ${d.ready} 位（至少 ${d.min_guests} 位可开场）`;
     mHint.textContent = canStart ? "选一个议题，阿鱼会开场主持" : `⚠️ 只有 ${d.ready} 位就绪，还差 ${d.min_guests - d.ready} 位`;
     mStart.disabled = !canStart;
-    d.topics.forEach(t => {
+    shown.forEach(t => {
+      // ⭐ 由谁提供 + 已经讨论了多少轮 + 谁参与过
+      const mine = debates.filter(x => (x.topic || "").trim() === t.title.trim());
+      const rounds = mine.reduce((a, x) => a + (x.rounds_done || 0), 0);
+      const who = [...new Set(mine.flatMap(x => x.participants || []))].join("、");
+      const bits = [t.author ? `由 ${esc(t.author)} 提供`
+                             : `<span class="todo">（未标注提出者）</span>`];
+      if (rounds) bits.push(`<span class="done">已讨论 ${rounds} 轮</span>`);
+      if (who) bits.push(`参与者：<span class="who">${esc(who)}</span>`);
       const el = document.createElement("div");
       el.className = "titem" + (t.index === d.current ? " sel" : "");
       el.dataset.index = t.index;
-      const byline = t.author ? `<div class="tb">由 ${esc(t.author)} 提出</div>` : "";
-      el.innerHTML = `<div class="ti">${t.index + 1}</div><div><div class="tt">${esc(t.title)}</div>${byline}</div>`;
+      el.innerHTML = `<div class="ti">${t.index + 1}</div><div><div class="tt">${esc(t.title)}</div>` +
+                     `<div class="tb">${bits.join(" · ")}</div></div>`;
       el.onclick = () => {
         topicList.querySelectorAll(".titem").forEach(x => x.classList.remove("sel"));
         el.classList.add("sel");
@@ -440,11 +461,18 @@ function loadTopics() {
       topicList.appendChild(el);
       if (pickedTopic === null) pickedTopic = d.current;
     });
+    // ⭐ 说明：这里只列前几个，想加/想整理去「议题整理」
+    const more = document.createElement("div");
+    more.className = "tmore";
+    more.textContent = n > TOPIC_SHOW_MAX
+      ? `上面是前 ${TOPIC_SHOW_MAX} 个（共 ${n} 个）—— 想讨论别的、想加减或排序，点「📋 议题整理」`
+      : `想加新议题、或调整顺序？点「📋 议题整理」`;
+    topicList.appendChild(more);
     showModal();
   }).catch(() => { mSub.textContent = "读不到议题（服务没起来？）"; showModal(); });
 }
 
-/* ── ⭐ 议题一览（所有议题 + 战绩 + 可拖动排序）── */
+/* ── ⭐ 议题整理（所有议题 + 战绩 + 可拖动排序）── */
 const libModal = document.getElementById("libModal");
 const libList = document.getElementById("libList");
 const libSub = document.getElementById("libSub");
@@ -604,7 +632,7 @@ async function saveAdd() {
   const j = await r.json();
   if (j.ok) {
     addModal.classList.add("hidden");
-    showLib();                      // ⭐ 回到议题一览，能看到新加的那条
+    showLib();                      // ⭐ 回到议题整理，能看到新加的那条
   } else {
     err.textContent = "⚠️ 保存失败（题目重复了？换个说法试试）";
   }
@@ -700,14 +728,14 @@ async function addCandidate(title, reason, author, btn) {
   if (j.ok) {
     addModal.classList.add("hidden");
     laPanel.classList.add("hidden");
-    showLib();                                  // ⭐ 直接回议题一览，能看见新加的那条
+    showLib();                                  // ⭐ 直接回议题整理，能看见新加的那条
   } else {
     btn.disabled = false;
     btn.textContent = "添加失败，再试";
   }
 }
 
-/* ⭐ 议题一览的「增加议题」入口 */
+/* ⭐ 议题整理的「增加议题」入口 */
 document.getElementById("libAdd").onclick = showAdd;
 
 mStart.onclick = async () => {
@@ -725,8 +753,10 @@ mStart.onclick = async () => {
   });
 };
 document.getElementById("mClose").onclick = hideModal;
-document.getElementById("changeTopic").onclick = showModal;
-document.getElementById("startBtn").onclick = showModal;
+// ⭐ 每次点开都重新读一遍议题 —— 以前只绑 showModal()，所以在「议题整理」里
+//    拖完顺序、加完议题，这里看到的还是开屏那一刻的旧列表（阿包发现的）
+document.getElementById("changeTopic").onclick = loadTopics;
+document.getElementById("startBtn").onclick = loadTopics;
 
 /* ── ⭐ 结束议题：停 → 问阿鱼要不要整理 ── */
 const askModal = document.getElementById("askModal");

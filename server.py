@@ -472,6 +472,39 @@ def say(who: str, text: str, kind: str = "chat") -> None:
 # ⭐ 记住每个模型"认哪套参数"（命中一次就缓存，后续不再试错）
 _PARAM_STYLE = {}
 
+# ⭐ 2026-10-11：偶发抽风不该让一位嘉宾**整场缺席**。
+#    Google 的 503 原文就写着 "Spikes in demand are usually temporary. Please try again later."
+#    实测连打 3 发：503 / 成功 / 503 —— 也就是说**重试真的救得回来**。
+RETRY_WAITS = (2, 5, 10)                        # 三次退避（首发 + 3 = 共 4 次机会）
+RETRY_CODES = (408, 429, 500, 502, 503, 504)    # 这些是"过会儿再来"型的错
+
+
+def _pick_text(data: dict) -> str:
+    """⭐ 从 OpenAI 兼容的响应里取正文 —— **取不到也不能丢 KeyError**。
+
+    2026-10-11 实测抓到的：探测 Gemini 时有一发回来了 HTTP 200，
+    但 message 里就是没有 `content`（空回复 / 被安全过滤）。老写法
+    `data["choices"][0]["message"]["content"]` 直接抛 `KeyError: 'content'`，
+    日志里只剩一句莫名其妙的 KeyError —— **真因全被盖住**。
+
+    现在的口径：
+      · `choices` 压根没有 / 结构不对 → 抛**带原文**的 RuntimeError（这种必须让人看见）
+      · 有 choices 但正文是空的 → 返回 ""（空回复是合法结果：推理模型把额度
+        全花在思考上、或者被安全过滤；上层已经有一套"空内容"的处理）
+    """
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError(f"响应里没有 choices：{json.dumps(data, ensure_ascii=False)[:200]}")
+    ch = choices[0] if isinstance(choices[0], dict) else {}
+    msg = ch.get("message")
+    if not isinstance(msg, dict):
+        msg = {}
+    for k in ("content", "reasoning_content", "text"):    # 各家字段名不统一，挨个试
+        v = msg.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
 
 def llm_call(base_url: str, model: str, api_key: str, messages: list,
              timeout: int = 180, temperature: float = 0.9,
@@ -495,7 +528,7 @@ def llm_call(base_url: str, model: str, api_key: str, messages: list,
             url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        return (data["choices"][0]["message"]["content"] or "").strip()
+        return _pick_text(data)      # ⭐ 别直接戳 choices[0].message.content —— 会 KeyError
 
     def _make(style: str) -> dict:
         p = {"model": model, "messages": messages}
@@ -521,24 +554,45 @@ def llm_call(base_url: str, model: str, api_key: str, messages: list,
 
     last = None
     for st in styles:
-        try:
-            out = _post(_make(st))
-            _PARAM_STYLE[model] = st
-            return out
-        except urllib.error.HTTPError as e:
-            detail = ""
+        payload = _make(st)
+        # ⭐ 每一套参数组合自带退避重试（首发 + len(RETRY_WAITS) 次）
+        for attempt in range(len(RETRY_WAITS) + 1):
             try:
-                detail = e.read().decode("utf-8", "replace")
-            except Exception:
-                pass
-            low = detail.lower()
-            last = urllib.error.HTTPError(
-                e.url, e.code, f"{e.reason} | {detail[:200]}", e.headers, None)
-            # 只对"参数不被支持"继续换组合；其它错误（额度/key/超时）立刻抛，别掩盖真因
-            if e.code == 400 and ("unsupported" in low or "not supported" in low
-                                  or "unknown parameter" in low):
-                continue
-            raise last
+                out = _post(payload)
+                _PARAM_STYLE[model] = st
+                return out
+            except urllib.error.HTTPError as e:
+                detail = ""
+                try:
+                    detail = e.read().decode("utf-8", "replace")
+                except Exception:
+                    pass
+                low = detail.lower()
+                last = urllib.error.HTTPError(
+                    e.url, e.code, f"{e.reason} | {detail[:200]}", e.headers, None)
+                # 「参数不被支持」→ 换下一套组合（这种重试没用，换组合才对）
+                if e.code == 400 and ("unsupported" in low or "not supported" in low
+                                      or "unknown parameter" in low):
+                    break
+                # ⭐ 临时性故障（503 / 429 / 5xx）→ 退避重试。
+                #    少了这一步，Google 抽一下风就让一位嘉宾**整场缺席**（阿包 10-11 遇到的）
+                if e.code in RETRY_CODES and attempt < len(RETRY_WAITS):
+                    wait = RETRY_WAITS[attempt]
+                    say("system", f"⏳ {model} 撞到 {e.code}，{wait} 秒后重试（第 {attempt + 2} 次）",
+                        "system")
+                    time.sleep(wait)
+                    continue
+                raise last
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                # 网络层（超时 / 连接被掐）也算"临时"，一并重试
+                last = e
+                if attempt < len(RETRY_WAITS):
+                    wait = RETRY_WAITS[attempt]
+                    say("system", f"⏳ {model} 网络异常（{type(e).__name__}），{wait} 秒后重试",
+                        "system")
+                    time.sleep(wait)
+                    continue
+                raise
     raise last if last else RuntimeError("llm_call: 没有可用的参数组合")
 
 

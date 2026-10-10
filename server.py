@@ -228,13 +228,52 @@ def strip_tail_seps(text: str) -> str:
     return text
 
 
+# ── ⭐ 议题库分两份（阿包 2026-10-11 定的）────────────────────────────
+#   topics.default.md —— 工程自带的默认议题，**只读**，跟着代码进 git
+#   topics.md         —— 你实际在用的那份，界面的增删改排序都改它，**不进 git**
+#   为什么分开：议题库是**会被程序在运行时改写**的数据。放进仓库的话，
+#   你每调一次顺序 / 删一个议题，`git status` 就脏一次 —— 阿包说"在我本地怪怪的"，就是这个。
+def topics_path() -> Path:
+    """读的时候用哪份：你自己的库优先；没有就先用工程自带的默认库顶着。"""
+    mine = ROOT / "topics.md"
+    if mine.exists():
+        return mine
+    dft = ROOT / "topics.default.md"
+    return dft if dft.exists() else mine
+
+
+def ensure_topics() -> None:
+    """第一次运行（还没有 `topics.md`）→ 从工程自带的默认库复制一份出来。
+
+    ⚠️ 顺手把文件头的说明换成"这是你自己的库" —— 否则复制过来的说明自相矛盾
+    （默认库那份写着"别改这个文件"）。
+    """
+    mine = ROOT / "topics.md"
+    dft = ROOT / "topics.default.md"
+    if mine.exists() or not dft.exists():
+        return
+    try:
+        txt = dft.read_text(encoding="utf-8")
+        head, sep, rest = txt.partition("\n## ")
+        new_head = (
+            "# AI 讨论会 · 议题库\n\n"
+            "> ⭐ **这是你自己的议题库** —— 界面上的增删、排序都改它；直接编辑也行，重启服务即生效。\n"
+            "> ⚠️ 它**不进 git**（在 .gitignore 里）—— 想改「新装时的默认议题」，去改 `topics.default.md`。\n"
+            "> 格式：`## 议题标题` 一行，下面写正文（可多行）；**标题行必须以 `## ` 开头**，程序靠它分段。\n"
+            "> 原始征集稿（含各位 AI 的完整提议原文）在 `桌面\\agent们\\茶话会议题征集.txt`。"
+        )
+        mine.write_text(new_head + sep + rest if sep else new_head + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def parse_topics() -> list:
-    """从 `topics.md` 读议题 —— ⭐ 这是议题的唯一来源（阿包手动维护的文件）。
+    """从议题库读议题（你自己的 `topics.md`；没有就用工程自带的 `topics.default.md`）。
 
     格式：一行 `## 标题`，下面跟正文（可多行，正文里含"由谁提供"）。
-    ⚠️ 这文件以后是阿包手动编辑的，解析必须宽松：认不出的内容忽略，绝不抛异常。
+    ⚠️ 这文件是阿包手写 + 界面改写的，解析必须宽松：认不出的内容忽略，绝不抛异常。
     """
-    path = ROOT / "topics.md"
+    path = topics_path()
     if not path.exists():
         return []
     out, cur = [], None
@@ -320,8 +359,9 @@ def write_topics(items: list) -> bool:
     排序 / 删除 / 新增都走这里 —— 只认 title + body，其余格式统一生成。
     ⚠️ 保留文件开头到第一个 `## ` 之前的部分（那是阿包自己写的说明），别冲掉。
     """
-    path = ROOT / "topics.md"
-    raw = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+    path = ROOT / "topics.md"          # ⭐ 永远写**你自己的**那份（默认库只读，绝不改它）
+    src = topics_path()                # 但开头那段说明，从"当前在读的那份"里取
+    raw = src.read_text(encoding="utf-8", errors="replace") if src.exists() else ""
     # ⭐ 文件头也要剥掉尾巴上的 `---`：write_topics 生成的第一条 `---` 会被切进 head，
     #    不剥的话每保存一次就多攒一条 —— 和 parse_topics 那边是同一个 bug 的两半。
     head = strip_tail_seps(raw.split("\n## ", 1)[0].rstrip()) or "# AI 讨论会 · 议题库"
@@ -1437,6 +1477,7 @@ def main() -> None:
     if args.selftest:
         raise SystemExit(selftest())
 
+    ensure_topics()          # ⭐ 第一次运行：把工程自带的默认议题复制成"你自己的库"
     settings = load_settings()
     roster = load_roster()
     ready = [g for g in roster if g.get("ready")]

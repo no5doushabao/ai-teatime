@@ -7,7 +7,9 @@
 ## 它能做什么
 
 - 🗣 **真模型讨论** —— 接入任意 OpenAI 兼容端点（DeepSeek / 通义千问 / OpenAI / 智谱 / Groq / 本地 Ollama…），**谁有 key 谁上场**，没配 key 的灰着
-- 📋 **议题制** —— 议题写在 `topics.md` 里；打开窗口弹出选择框，每个议题分多轮讨论
+- 📋 **议题制** —— 议题库是**你自己的** `topics.md`（工程自带默认议题 `topics.default.md`，首次运行自动复制一份）；
+  打开窗口弹出选择框、**点中哪条就展开「为什么提它」**，每个议题分多轮讨论
+- 🎚️ **参会者一览** —— 点头像就能拖滑杆调这位 AI 的「思考用量」（还能勾「不限制」）；议题框里另有「预设轮数」，这场跑多久你说了算
 - 🔄 **圆桌制** —— 一轮里每人**各发言一次**、等齐了才进下一轮，每轮换人开场
 - 🧠 **认真听** —— 每人发言前会读到【本轮已发言的原文】+【前几轮的会议纪要】；提示词要求至少 300 字、有立场有论证、必须点名回应他人
 - 📝 **会议纪要** —— 每轮结束由"记录员"模型把有价值的论点（核心论点 / 论据 / 反驳 / 新概念 / 谁改了立场）提炼进一份**全员共享**的历史框，下一轮所有人都读得到
@@ -44,19 +46,22 @@ cd ai-teatime
 | 想改什么 | 改哪 |
 |---|---|
 | **API key** | `keys.local.json` —— 保存即生效，不用重启 |
-| **议题** | `topics.md` —— 一行 `## 标题` + 正文，加一条就多一个议题 |
+| **议题** | `topics.md`（**你自己那份，不进 git**）—— 一行 `## 标题` + 正文，加一条就多一个议题；<br>想改「新装时的默认议题」→ `topics.default.md` |
+| **每位 AI 的思考用量** | 界面上「👥 参会者一览」里拖滑杆 → 存进 `think-budget.json` |
 | **嘉宾 / 模型 / 轮数 / 预算** | `config.local.json`（模板见 `config.example.json`） |
 
 - key 的查找顺序：`keys.local.json` → 同名环境变量 → DSH 的 `~/.dsh/.credentials.yaml`
-- ⚠️ `keys.local.json` 和 `config.local.json` 已被 `.gitignore` 排除，**别提交**
+- ⚠️ `keys.local.json`、`config.local.json`、`think-budget.json`、`topics.md` 都被 `.gitignore` 排除，**别提交**
+  （议题特意拆成两份：`topics.md` 会被程序在运行时改写，放进仓库会让 `git status` 一直是脏的）
 
 ## 文件
 
 | 文件 | 作用 |
 |---|---|
 | `server.py` | 本地服务（零依赖，纯标准库）：SSE 推送、圆桌编排、模型调用、记录员 |
-| `static/index.html` | 界面（深色 QQ 风 + 议题弹窗 + 议题库 + 长文折叠 + 纪要卡片） |
-| `topics.md` | 议题库的来源 |
+| `static/index.html` | 界面（深色 QQ 风 + 议题弹窗 + 议题库 + 参会者一览 + 长文折叠 + 纪要卡片） |
+| `topics.default.md` | 工程自带的**默认议题**（首次运行会复制成 `topics.md`） |
+| `topics.md` | ⭐ **你自己的议题库** —— 界面上的增删改排序都改它；运行时数据，**不进 git** |
 | `config.example.json` | 嘉宾名单 / 角色卡 / 讨论要求 / 轮数 / 预算 |
 | `keys.example.json` | key 模板 |
 | `gen_avatars.py` · `import_avatars.py` | 生成像素头像 / 把立绘裁成圆形头像 |

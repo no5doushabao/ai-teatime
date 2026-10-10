@@ -41,6 +41,7 @@
   }
   #topicBar.on { display: flex; }
   #topicBar .tl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #topicBar .mini { flex: 0 0 auto; white-space: nowrap; }   /* ⭐ 按钮变长了也别被压扁/换行 */
 
   /* ── 消息流 ── */
   #flow { flex: 1; overflow-y: auto; padding: 16px 16px 6px; scroll-behavior: smooth; }
@@ -258,9 +259,9 @@
 </header>
 
 <div id="topicBar" class="on">
-  <span>📌</span><span class="tl" id="topicText">还没选议题 —— 点「换议题」挑一个</span>
+  <span>📌</span><span class="tl" id="topicText">还没选议题 —— 点「🍵 开场 / 换议题」挑一个</span>
   <button class="mini" id="libBtn">📋 议题整理</button>
-  <button class="mini" id="changeTopic">换议题</button>
+  <button class="mini" id="changeTopic">🍵 开场 / 换议题</button>
 </div>
 
 <div id="flow"></div>

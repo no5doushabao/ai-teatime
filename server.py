@@ -147,6 +147,27 @@ def load_roster() -> list:
 _chosen_topic_index = 0          # ⭐ 阿包在界面上选的议题（0 = 第一个）
 
 
+_SEP_TAIL = re.compile(r"(?:\s*\n)*\s*-{3,}\s*$")
+
+
+def strip_tail_seps(text: str) -> str:
+    """⭐ 剥掉尾部累积的 `---` 装饰行（一直剥到不再变化为止）。
+
+    为什么需要它：议题之间那条 `---` 是 write_topics() **生成给人看的装饰**，
+    而解析只认 `## ` 分段 —— 于是它会被算进**上一个议题正文的尾巴**、
+    也会被算进**文件头部说明的尾巴**；下次保存再生成一条，就又多留一条。
+    → 每保存一次（排序 / 删除 / 新增）+1 条，文件无限膨胀。
+    阿包 2026-10-11 发现的：`topics.md` 里攒了 63 个 `---`，而议题只有 6 个。
+
+    ⚠️ 只剥**尾部**的，正文中间的 `---` 是阿包自己写的，不动。
+    """
+    prev = None
+    while prev != text:
+        prev = text
+        text = _SEP_TAIL.sub("", text).rstrip()
+    return text
+
+
 def parse_topics() -> list:
     """从 `topics.md` 读议题 —— ⭐ 这是议题的唯一来源（阿包手动维护的文件）。
 
@@ -168,7 +189,7 @@ def parse_topics() -> list:
     if cur:
         out.append(cur)
     for t in out:
-        t["body"] = t["body"].strip()
+        t["body"] = strip_tail_seps(t["body"].strip())      # ⭐ 剥掉尾巴上的 `---`（见上方说明）
         t["author"] = parse_author(t["body"])
     return out
 
@@ -241,7 +262,9 @@ def write_topics(items: list) -> bool:
     """
     path = ROOT / "topics.md"
     raw = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
-    head = raw.split("\n## ", 1)[0].rstrip() or "# AI 讨论会 · 议题库"
+    # ⭐ 文件头也要剥掉尾巴上的 `---`：write_topics 生成的第一条 `---` 会被切进 head，
+    #    不剥的话每保存一次就多攒一条 —— 和 parse_topics 那边是同一个 bug 的两半。
+    head = strip_tail_seps(raw.split("\n## ", 1)[0].rstrip()) or "# AI 讨论会 · 议题库"
     lines = [head, ""]
     for t in items:
         lines += ["", "---", "", f"## {t['title']}", ""]
@@ -918,7 +941,7 @@ def idle_loop(roster: list, settings: dict) -> None:
     names = "、".join(g["name"] for g in ready) or "（空场）"
     say("system", f"🍵 讨论会待机中 · 在场：{names}　就绪 {len(ready)}/{settings['min_guests']} 位", "system")
     say("system", f"本次议题：{settings['topic']}", "system")
-    say("system", "点上方「换议题」挑一个就能开始；也可以直接说话，在场的会回你", "system")
+    say("system", "点上方「🍵 开场 / 换议题」挑一个就能开始；也可以直接说话，在场的会回你", "system")
 
     while True:
         if _start_event.is_set() and len(ready) >= settings["min_guests"]:
@@ -1269,7 +1292,7 @@ def main() -> None:
             demo_loop()
             return
         # ⭐ 默认**不自动开场**（阿包 10-10 喊停过服务 → 不想它自己烧额度）：
-        #    双击启动器只是"支起场子"，想讨论时点界面上方的「换议题」。
+        #    双击启动器只是"支起场子"，想讨论时点界面上方的「🍵 开场 / 换议题」。
         #    想恢复"人齐就自动开始" → config 里把 auto_start 设成 true。
         if (not settings["auto_start"]) or len(ready) < settings["min_guests"]:
             idle_loop(roster, settings)

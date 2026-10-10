@@ -279,18 +279,40 @@ def reset_topic(title: str) -> int:
 
 
 def parse_candidate_topics(text: str) -> list:
-    """⭐ 从 AI 的回答里抠出「议题备选」列表（认 `1. xxx` / `- xxx` 这种行）。
+    """⭐ 从 AI 的回答里抠出「议题备选」：返回 [{title, reason}]。
 
-    线上模型不一定听话，所以宽松点：认不出就返回空列表，前端就只显示"添加"。
+    认这种成对的行（`1. 题目` 下面跟 `理由：…`）：
+        1. 议题内容
+        理由：为什么值得讨论
+        2. 议题内容
+        理由：……
+    ⚠️ 线上模型不一定听话：没写"理由："就把紧跟着的那行当理由；认不出就返回空列表。
     """
-    out = []
-    for line in (text or "").splitlines():
-        m = re.match(r"^\s*(?:\d+\s*[.、)）]|[-*·])\s*(.{6,})$", line.strip())
+    out, cur = [], None
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = re.match(r"^\s*(?:\d+\s*[.、)）]|[-*·])\s*(.{4,})$", line)
         if m:
-            t = m.group(1).strip().strip("*#「」【】 ").strip()
-            if t and t not in out:
-                out.append(t)
-    return out[:6]
+            if cur:
+                out.append(cur)
+            cur = {"title": m.group(1).strip().strip("*#「」【】 ").strip(), "reason": ""}
+            continue
+        if cur is not None:
+            r = re.match(r"^\s*\**\s*(?:理由|原因|为什么|说明|看点)\s*\**\s*[:：]\s*(.+)$", line)
+            if r:
+                cur["reason"] = r.group(1).strip().strip("* ")
+            elif not cur["reason"] and len(line) > 4 and not line.startswith("#"):
+                cur["reason"] = line.lstrip("-*· ").strip()      # 没写"理由："就当下行是理由
+    if cur:
+        out.append(cur)
+    seen, uniq = set(), []
+    for c in out:
+        if c["title"] and c["title"] not in seen:
+            seen.add(c["title"])
+            uniq.append(c)
+    return uniq[:6]
 
 
 def ask_guest_for_topics(who: str) -> dict:
@@ -313,10 +335,10 @@ def ask_guest_for_topics(who: str) -> dict:
                 f"【现在正在讨论的议题】\n{cur}\n\n"
                 f"【已经讨论过的（别重复）】\n" + ("\n".join(f"- {p}" for p in past if p) or "（还没有）") +
                 "\n\n请提 **1~3 个新的讨论议题**（可以是当前议题的延伸，也可以是完全不同的话题）。要求：\n"
-                "① 每个议题一句话说清；\n"
-                "② 要有「可争」的空间，不能是一句话就能答完的问题；\n"
-                "③ **严格**按下面的格式逐行列出，除了这些行什么都不要写：\n\n"
-                "1. 议题内容\n2. 议题内容\n"},
+                "① 每个议题一句话说清，要有「可争」的空间，不能是一句话就能答完的问题；\n"
+                "② 每个议题**必须再跟一句「理由：」，说清为什么值得讨论**（一两句话，别空着）；\n"
+                "③ **严格**按下面的格式，每条两行，除了这些行什么都不要写：\n\n"
+                "1. 议题内容\n理由：为什么值得讨论\n2. 议题内容\n理由：为什么值得讨论\n"},
         ], max_tokens=1500)
     except Exception as e:
         return {"ok": False, "err": f"{type(e).__name__}: {str(e)[:120]}"}

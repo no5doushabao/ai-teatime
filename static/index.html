@@ -221,6 +221,11 @@
                white-space: pre-wrap; max-height: 220px; overflow-y: auto; }
   .la-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
   .la-btns button { padding: 7px 15px; font-size: 13px; }
+  /* ⭐ 备选议题：题目 + 理由 */
+  .la-item { margin-bottom: 10px; }
+  .la-item:last-child { margin-bottom: 0; }
+  .la-t { font-weight: 600; color: #eaecf5; }
+  .la-r { font-size: 12.5px; color: #9fd39f; margin-top: 3px; }
 
   /* ⭐ 最终会议纪要（阿鱼整理的那份大总结） */
   .summary {
@@ -657,15 +662,22 @@ async function askGuest(g) {
 
   laStatus.textContent = "";
   laWho.textContent = `${j.name} 说：`;
-  laBubble.textContent = j.text;
-  // ⭐ 有备选 → 添加1 / 添加2 …；没有 → 就一个「添加」
-  const cands = (j.topics && j.topics.length) ? j.topics : [j.text];
+  const list = (j.topics && j.topics.length) ? j.topics : null;
+  // ⭐ 有备选就逐条渲染「题目 + 理由」；没有就把原话整段显示
+  if (list) {
+    laBubble.innerHTML = list.map((c, i) =>
+      `<div class="la-item"><div class="la-t">${i + 1}. ${esc(c.title)}</div>` +
+      (c.reason ? `<div class="la-r">💡 ${esc(c.reason)}</div>` : "") + `</div>`).join("");
+  } else {
+    laBubble.textContent = j.text;
+  }
+  const cands = list || [{ title: j.text, reason: "" }];
   laBtns.innerHTML = "";
-  cands.forEach((t, i) => {
+  cands.forEach((c, i) => {
     const b = document.createElement("button");
     b.textContent = cands.length > 1 ? `添加${i + 1}` : "添加";
-    b.title = t.length > 60 ? t.slice(0, 60) + "…" : t;
-    b.onclick = () => addCandidate(t, j.name, j.text, b);
+    b.title = c.title.length > 60 ? c.title.slice(0, 60) + "…" : c.title;
+    b.onclick = () => addCandidate(c.title, c.reason || j.text, j.name, b);
     laBtns.appendChild(b);
   });
   const again = document.createElement("button");
@@ -676,7 +688,7 @@ async function askGuest(g) {
   laAnswer.classList.remove("hidden");
 }
 
-async function addCandidate(title, author, reason, btn) {
+async function addCandidate(title, reason, author, btn) {
   btn.disabled = true;
   btn.textContent = "写入中…";
   const short = title.length > 110 ? title.slice(0, 108) + "…" : title;

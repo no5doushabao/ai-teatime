@@ -601,7 +601,13 @@ _PARAM_STYLE = {}
 # ⭐ 2026-10-11：偶发抽风不该让一位嘉宾**整场缺席**。
 #    Google 的 503 原文就写着 "Spikes in demand are usually temporary. Please try again later."
 #    实测连打 3 发：503 / 成功 / 503 —— 也就是说**重试真的救得回来**。
-RETRY_WAITS = (2, 5, 10)                        # 三次退避（首发 + 3 = 共 4 次机会）
+#
+# ⚠️⚠️ 但同一天下午的实测又补了一课：**2s/5s/10s 对 429（限流）太短了** ——
+#    限流窗口是按**分钟**算的，三次重试全落在同一个窗口里，等于白试。
+#    阿包那场（05:31「幽默与情感」）：Gemini 从**第 1 轮**就撞 429，前两轮靠重试救回，
+#    第 3 轮起救不回 → 掉线 → 之后每轮再试、再撞、再掉，一路白等到散场。
+RETRY_WAITS = (8, 20, 40)                       # 三次退避（首发 + 3 = 共 4 次机会）
+RETRY_MAX_WAIT = 60                             # 服务端让我们等更久时，最多等这么久（别把讨论卡死）
 RETRY_CODES = (408, 429, 500, 502, 503, 504)    # 这些是"过会儿再来"型的错
 
 
@@ -630,6 +636,28 @@ def _pick_text(data: dict) -> str:
         if isinstance(v, str) and v.strip():
             return v.strip()
     return ""
+
+
+def _server_wait_hint(e, detail: str):
+    """⭐ 从限流响应里挖出**服务端建议等多久**（拿不到就返回 None）。
+
+    比我们自己瞎猜强得多 —— 限流窗口到底多长，只有服务端知道：
+      · HTTP 头 `Retry-After`（标准写法，单位秒）
+      · Google / Gemini 的 `details[].retryDelay`，形如 `"retryDelay": "27s"`
+    """
+    try:
+        ra = (e.headers or {}).get("Retry-After")
+        if ra:
+            return float(str(ra).strip())
+    except Exception:
+        pass
+    m = re.search(r'"retryDelay"\s*:\s*"([\d.]+)s"', detail or "")
+    if m:
+        try:
+            return float(m.group(1))
+        except Exception:
+            pass
+    return None
 
 
 def llm_call(base_url: str, model: str, api_key: str, messages: list,
@@ -694,8 +722,10 @@ def llm_call(base_url: str, model: str, api_key: str, messages: list,
                 except Exception:
                     pass
                 low = detail.lower()
+                # ⭐ 截断放宽到 600：429 的配额详情（quotaId / retryDelay）都藏在后面，
+                #    截太短就只能看到一句 "Too Many Requests"，等于没有真因
                 last = urllib.error.HTTPError(
-                    e.url, e.code, f"{e.reason} | {detail[:200]}", e.headers, None)
+                    e.url, e.code, f"{e.reason} | {detail[:600]}", e.headers, None)
                 # 「参数不被支持」→ 换下一套组合（这种重试没用，换组合才对）
                 if e.code == 400 and ("unsupported" in low or "not supported" in low
                                       or "unknown parameter" in low):
@@ -704,8 +734,13 @@ def llm_call(base_url: str, model: str, api_key: str, messages: list,
                 #    少了这一步，Google 抽一下风就让一位嘉宾**整场缺席**（阿包 10-11 遇到的）
                 if e.code in RETRY_CODES and attempt < len(RETRY_WAITS):
                     wait = RETRY_WAITS[attempt]
-                    say("system", f"⏳ {model} 撞到 {e.code}，{wait} 秒后重试（第 {attempt + 2} 次）",
-                        "system")
+                    hint = _server_wait_hint(e, detail)      # ⭐ 服务端说等多久就等多久
+                    if hint:
+                        wait = max(wait, min(hint + 1, RETRY_MAX_WAIT))
+                    why = "限流(429)" if e.code == 429 else str(e.code)
+                    say("system",
+                        f"⏳ {model} 撞到 {why}，{wait:.0f} 秒后重试（第 {attempt + 2} 次）"
+                        + ("　← 按服务端给的等待时间" if hint else ""), "system")
                     time.sleep(wait)
                     continue
                 raise last
@@ -764,6 +799,9 @@ class RealTable:
         self.round_turns = []            # ⭐ 本轮已发言（原文，按顺序 —— 保证"听全了同桌"）
         self.by_guest = {}               # ⭐ 每人历次发言（防原地打转，允许深化）
         self.over_budget = False
+        # ⭐ 被"请下场"的嘉宾：who -> 连续失败次数（阿包 10-11 那场：Gemini 从第 3 轮起
+        #    每轮都撞 429，三次退避全落在同一个限流窗口里 → 每轮白等 70 秒，一直等到散场）
+        self.sidelined = {}
 
     def round_so_far(self) -> str:
         if not self.round_turns:
@@ -956,6 +994,10 @@ class RealTable:
             if r == 1:      # ⭐ 第一轮把命题人提到最前 —— 跟开场白里点名的那位**对齐**
                 order = [first] + [g for g in order if g["who"] != first["who"]]
             for g in order:
+                # ⭐ 已经被"请下场"的，本场不再请他 —— 否则每轮都要白等三次退避
+                #    （阿包那场就是：Gemini 掉线后每轮还在傻等 70 秒，一路等到散场）
+                if self.sidelined.get(g["who"], 0) >= 2:
+                    continue
                 # ⭐ 更细的检查点：一轮要好几分钟，等人说完就停，别拖到下一轮
                 if _stop_event.is_set():
                     if self.round_turns:
@@ -973,7 +1015,18 @@ class RealTable:
                     t = self.ask(g, "轮到你发言了。请给出你的立场和论证。")
                 except Exception as e:
                     say("system", f"（{g['name']} 掉线了：{type(e).__name__}: {str(e)[:80]}）", "system")
+                    # ⭐ key 错 / 参数错这类**永久性**错误 → 当场请下场，别再每轮试；
+                    #    429 / 503 这类**临时**的 → 连败两轮才请下场（留一次自愈的机会）
+                    hard = isinstance(e, urllib.error.HTTPError) and e.code in (400, 401, 403, 404)
+                    n = 2 if hard else self.sidelined.get(g["who"], 0) + 1
+                    self.sidelined[g["who"]] = n
+                    if n >= 2:
+                        why = "的配置有问题（key / 参数）" if hard else "连续失败，多半是被限流"
+                        say("system",
+                            f"（⚠️ {g['name']} {why} —— 本场先不请他了，"
+                            f"剩下的轮次不再等他、也不白等退避）", "system")
                     continue
+                self.sidelined[g["who"]] = 0        # ⭐ 成功一次就清零
                 say(g["who"], t)
                 self._record(g, r, t)
 

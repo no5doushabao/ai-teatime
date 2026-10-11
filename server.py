@@ -1030,7 +1030,21 @@ class RealTable:
                 say(g["who"], t)
                 self._record(g, r, t)
 
-            self._write_notes(r)           # ⭐ 每轮结束：记录员整理进公用历史框
+            self._write_notes(r)           # ⭐ 每轮结束：记录员整理成小纪要（公用历史框）
+
+            # ⭐ 手动模式（默认）：停下等阿包点「▶ 开始下一轮」
+            #    （点了「⚡ 自动」就跳过这里，像以前那样一口气跑完）
+            if (not _auto_next) and r < s["rounds"]:
+                why = _wait_next_round(r, self)
+                if why == "stop":
+                    say("system", f"🛑 阿包结束了讨论（第 {r} 轮讲完）—— "
+                                  f"可以点「整理会议记录」让我汇总", "system")
+                    self._hist_progress(r, finished=True)
+                    return
+                if why == "budget":
+                    say("system", "💸 触到预算上限，先散会 —— 想继续就把 budget_cny 调大", "system")
+                    self._hist_progress(r, finished=True)
+                    return
 
         self._hist_progress(s["rounds"], finished=True)      # ⭐ 议题库要能看出"讨论完了没"
         say("system", f"讨论结束（{s['rounds']} 轮）· 粗估 {self.spent_tokens} tokens", "system")
@@ -1105,6 +1119,40 @@ _start_event = threading.Event()
 _start_settings = {}          # ⭐ 阿包按下「开场」那一刻的最新配置（含他刚选中的议题）
 _stop_event = threading.Event()   # ⭐ 阿包按了「结束议题」
 _last_log_path = None             # ⭐ 最近一场的日志路径（做总结时要读它）
+
+# ⭐ 轮次的手动 / 自动（阿包 2026-10-11 下午要求）
+#    默认**手动**：每轮由阿鱼总结完就停下，等他点「▶ 开始下一轮」；
+#    点了「⚡ 自动」才像以前那样一口气跑完。
+_auto_next = False
+_next_round = threading.Event()   # 阿包点了「开始下一轮」→ 放行
+_next_waiting = False             # 现在是不是正卡在"等下一轮"上（界面上要显示）
+
+
+def _wait_next_round(r: int, table) -> str:
+    """⭐ 手动模式：停下来等阿包点「▶ 开始下一轮」。
+
+    返回 "go"（继续）/ "stop"（他按了结束议题）/ "budget"（超预算）。
+
+    ⚠️ 等待期间必须还能响应「结束议题」—— 所以用 0.5 秒一轮的轮询，不能死等。
+    """
+    global _next_waiting
+    # ⚠️ **必须先 clear 再 say**（顺序反了会吃掉用户那一下点击）：
+    #    如果先 say，而"开始下一轮"的请求正好在这一瞬间到达并 set，
+    #    紧接着的 clear() 就把它抹掉了 —— 结果讨论永远卡在那儿（本地测试就是这么卡死的）。
+    _next_round.clear()
+    say("system", f"⏸ 第 {r} 轮结束 —— 点下面的「▶ 开始下一轮」继续；"
+                  f"想让它自己跑下去，就点上面的「⚡ 自动」", "wait")
+    _next_waiting = True
+    try:
+        while not _next_round.wait(0.5):
+            if _stop_event.is_set():
+                return "stop"
+            if getattr(table, "over_budget", False):
+                return "budget"
+        return "go"
+    finally:
+        _next_waiting = False
+        _next_round.clear()
 
 
 def stop_requested() -> None:
@@ -1382,6 +1430,15 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/state":                  # ⭐ 界面开屏要知道现在是自动还是手动
+            body = json.dumps({"auto": _auto_next, "waiting": _next_waiting},
+                              ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/think_budget":           # ⭐ 参会者一览：各位的思考用量
             body = json.dumps({"budgets": _think_budget,
                                "default": load_settings()["max_tokens"],
@@ -1398,7 +1455,7 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
-        global _chosen_topic_index, _rounds_override
+        global _chosen_topic_index, _rounds_override, _auto_next
         if self.path == "/ask_guest":               # ⭐ 现场提问：让某位在座的 AI 提议题备选
             n = int(self.headers.get("Content-Length", 0))
             try:
@@ -1482,6 +1539,31 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return
+        if self.path == "/next_round":              # ⭐ 手动模式：阿包点了「▶ 开始下一轮」
+            _next_round.set()                       # 放行（等待中的那轮循环会自己醒来）
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+            return
+        if self.path == "/auto":                    # ⭐ 切换「⚡ 自动」
+            n = int(self.headers.get("Content-Length", 0))
+            payload = {}
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                pass
+            _auto_next = bool(payload.get("on"))
+            if _auto_next:
+                _next_round.set()                   # 正卡在"等下一轮"的话，立刻放行
+            say("system", "⚡ 切到自动模式 —— 后面几轮会自己跑下去"
+                if _auto_next else
+                "⏸ 切回手动模式 —— 每轮结束会停下等你点「开始下一轮」", "system")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
             return
         if self.path == "/stop":                   # ⭐ 阿包按了「结束议题」
             stop_requested()

@@ -226,6 +226,16 @@
     margin-top: 9px; padding: 8px 11px; border-radius: 8px; line-height: 1.6;
     font-size: 12px; color: #ff9b9b; background: #3a1f24; border: 1px solid #6b2f38;
   }
+
+  /* ── ⭐ 手动模式：每轮停下等阿包点「开始下一轮」── */
+  .waitbox {
+    margin: 14px auto; padding: 12px 16px 14px; max-width: 430px; text-align: center;
+    background: #232b3d; border: 1px solid #4a6ea8; border-radius: 12px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.3);
+  }
+  .waitbox .wt { font-size: 12.5px; color: #c9d6e8; line-height: 1.7; }
+  .waitbox .nextbtn { margin-top: 10px; padding: 7px 20px; font-size: 13px; }
+  #autoBtn.on { background: #4a7fc4; color: #fff; border-color: #6a9fe4; }
   .ghost { background: #2a2a34; border: 1px solid #3a3a46; color: #c9c9d6; }
 
   /* ⭐ 议题整理 */
@@ -326,6 +336,7 @@
   <div class="seat">
     <span>💬 旁听席（你）—— 说的话会进下一轮，大家都会看到</span>
     <span class="sp"></span>
+    <button id="autoBtn" class="mini" title="点一下 = 让它自己跑；再点 = 切回手动（每轮停下等你）">⚡ 自动</button>
     <button id="stopBtn" class="mini">🛑 结束议题</button>
   </div>
   <div class="inputbar">
@@ -914,6 +925,21 @@ function addMsg(m) {
     flow.scrollTop = flow.scrollHeight;
     return;
   }
+  // ⭐ 手动模式：停下等阿包点「▶ 开始下一轮」（阿包 2026-10-11 要的）
+  if (m.kind === "wait") {
+    const d = document.createElement("div");
+    d.className = "waitbox";
+    d.innerHTML = `<div class="wt">${esc(m.text)}</div>` +
+                  `<button class="nextbtn">▶ 开始下一轮</button>`;
+    d.querySelector(".nextbtn").onclick = async (ev) => {
+      ev.target.disabled = true;
+      ev.target.textContent = "已开始…";
+      await fetch("/next_round", { method: "POST" });
+    };
+    flow.appendChild(d);
+    flow.scrollTop = flow.scrollHeight;
+    return;
+  }
   if (m.kind === "system" || m.who === "system") {
     const d = document.createElement("div");
     d.className = "sys";
@@ -965,6 +991,28 @@ document.getElementById("send").onclick = send;
 document.getElementById("msg").addEventListener("keydown", e => {
   if (e.key === "Enter") send();
 });
+
+/* ⭐ 「⚡ 自动」：**默认手动** —— 每轮阿鱼总结完就停下，等点「▶ 开始下一轮」；
+   点了自动才像以前那样一口气跑完（阿包 2026-10-11 下午要的） */
+const autoBtn = document.getElementById("autoBtn");
+let autoOn = false;
+function paintAuto() {
+  autoBtn.textContent = autoOn ? "⚡ 自动（开）" : "⚡ 自动";
+  autoBtn.classList.toggle("on", autoOn);
+}
+autoBtn.onclick = async () => {
+  autoOn = !autoOn;
+  paintAuto();
+  await fetch("/auto", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ on: autoOn })
+  });
+};
+paintAuto();
+fetch("/state").then(r => r.json())
+  .then(s => { autoOn = !!s.auto; paintAuto(); })
+  .catch(() => {});
 
 /* ⭐ 参会者一览：点头像 → 拖滑块调这位 AI 的「思考用量」（阿包 2026-10-11 要求）
    · 滑块像音量条一样**连续可调**（1000~16000，不设死档位）

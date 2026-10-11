@@ -2161,7 +2161,9 @@ class Handler(SimpleHTTPRequestHandler):
                 {"who": g["who"], "name": g.get("name", g["who"]),
                  "org": g.get("org", ""), "ready": bool(g.get("ready")),
                  # ⭐ resting：界面靠它画灰头像 + 😴 角标、「休息中 N 位」
-                 "resting": bool(g.get("resting"))}
+                 "resting": bool(g.get("resting")),
+                 # ⭐ vision：能不能看图（界面上可以提示"这位看不到图"）
+                 "vision": bool(g.get("vision", True))}
                 for g in roster]}, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")

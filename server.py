@@ -33,6 +33,7 @@ import threading
 import time
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -492,6 +493,73 @@ def save_history(h: dict) -> None:
         _history_path.write_text(json.dumps(h, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
+
+
+# ── ⭐ 往期讨论（阿包 2026-10-11 下午要的）──────────────────────────
+#   原话：「用户只能看见讨论了多少轮，但是无法看见结果，好像意义不是特别大」
+#   数据就在 logs/*.md 里（每场一个文件，纪要在末尾），这里只是给它开个门。
+def list_past_debates() -> list:
+    """列 `logs/` 下的往期讨论，**新的在前**。每场：时间 / 议题 / 轮数 / 谁说过话 / 有没有纪要。"""
+    d = ROOT / "logs"
+    if not d.exists():
+        return []
+    out = []
+    for p in sorted(d.glob("*.md"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        m = re.match(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-(.*)\.md$", p.name)
+        if m:
+            ts = f"{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}"
+            topic = m.group(7).replace("-", " ")
+        else:
+            ts, topic = "", p.stem
+        speakers = []
+        for who in re.findall(r"^- \*\*\d{2}:\d{2} ([^*]+?)\*\*", txt, re.M):
+            who = who.strip()
+            if who and who != "system" and who not in speakers:
+                speakers.append(who)
+        # ⚠️ 只点了个开场、一轮都没跑起来的**空壳**（0.3~0.6 KB）不列进来 ——
+        #    实测 28 个日志里一大半是这种（点了开场又立刻结束），会把列表刷满
+        rounds = len(re.findall(r"—— 第 \d+ 轮 ——", txt))
+        has_sum = "会议纪要（阿鱼整理）" in txt
+        if rounds == 0 and not has_sum:      # 空壳（一轮没跑、也没纪要）才跳过
+            continue
+        out.append({
+            "file": p.name,
+            "ts": ts,
+            "topic": topic,
+            "rounds": rounds,
+            "speakers": speakers,
+            "has_summary": has_sum,
+            "kb": round(p.stat().st_size / 1024, 1),
+        })
+    return out
+
+
+def read_past_debate(fname: str, mode: str = "summary") -> str:
+    """读一场往期讨论。`mode=summary` 只给会议纪要；`full` 给全文。
+
+    ⚠️ 只认 `logs/` 下的 `.md`，文件名里不许有路径分隔符 —— 挡路径穿越。
+    """
+    if not fname or "/" in fname or "\\" in fname or not fname.endswith(".md"):
+        return ""
+    p = ROOT / "logs" / fname
+    if not p.exists() or not p.is_file():
+        return ""
+    try:
+        txt = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    if mode != "full":
+        parts = re.split(r"^# 📝 会议纪要（阿鱼整理）\s*$", txt, flags=re.M)
+        if len(parts) > 1:
+            return parts[-1].strip()
+        return ("（这场没有会议纪要 —— 那要等讨论结束后点「🛑 结束议题」，"
+                "阿鱼问「要我帮你整理吗」时选「需要」才会生成。\n"
+                "先切到「看完整记录」能看到原始过程。）")
+    return txt
 
 
 # ⭐ 命题人 → 桌上的人（2026-10-11 修 bug 时加的）
@@ -1424,6 +1492,26 @@ class Handler(SimpleHTTPRequestHandler):
                 {"who": g["who"], "name": g.get("name", g["who"]),
                  "org": g.get("org", ""), "ready": bool(g.get("ready"))}
                 for g in roster]}, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/past"):          # ⭐ 往期讨论：不带 file = 列表；带 = 读某一场
+            q = self.path.split("?", 1)[1] if "?" in self.path else ""
+            args = {}
+            for kv in q.split("&"):
+                k, _, v = kv.partition("=")
+                if k:
+                    args[k] = urllib.parse.unquote(v)
+            if args.get("file"):
+                txt = read_past_debate(args["file"], args.get("mode") or "summary")
+                body = json.dumps({"ok": bool(txt), "text": txt},
+                                  ensure_ascii=False).encode("utf-8")
+            else:
+                body = json.dumps({"items": list_past_debates()},
+                                  ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))

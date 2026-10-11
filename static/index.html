@@ -236,6 +236,31 @@
   .waitbox .wt { font-size: 12.5px; color: #c9d6e8; line-height: 1.7; }
   .waitbox .nextbtn { margin-top: 10px; padding: 7px 20px; font-size: 13px; }
   #autoBtn.on { background: #4a7fc4; color: #fff; border-color: #6a9fe4; }
+
+  /* ── ⭐ 往期讨论 ── */
+  .pbox { width: 620px; }
+  .plist { padding: 4px 14px 8px; overflow-y: auto; max-height: 52vh; }
+  .plist::-webkit-scrollbar { width: 8px; }
+  .plist::-webkit-scrollbar-thumb { background: #33333e; border-radius: 4px; }
+  .pitem {
+    padding: 10px 13px; margin: 6px 0; border-radius: 11px; cursor: pointer;
+    border: 1px solid #2f2f3a; background: #26262e; transition: all .12s;
+  }
+  .pitem:hover { background: #2d2d38; border-color: #3d4a5e; }
+  .pitem .pt { font-size: 13px; color: #e2e6ee; line-height: 1.5; }
+  .pitem .pm { font-size: 11.5px; color: #83839a; margin-top: 4px; }
+  .pitem .psum { color: #9fd39f; }
+  .pitem .pno  { color: #b08a5a; }
+  .pdetail { padding: 4px 16px 8px; overflow-y: auto; max-height: 58vh; }
+  .pdhead { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+  .pdhead .pdtitle {
+    flex: 1; font-size: 12px; color: #9ecbff;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .pdtext {
+    font-size: 12.5px; line-height: 1.85; color: #c9c9d6;
+    white-space: pre-wrap; word-break: break-word;
+  }
   .ghost { background: #2a2a34; border: 1px solid #3a3a46; color: #c9c9d6; }
 
   /* ⭐ 议题整理 */
@@ -337,6 +362,7 @@
     <span>💬 旁听席（你）—— 说的话会进下一轮，大家都会看到</span>
     <span class="sp"></span>
     <button id="autoBtn" class="mini" title="点一下 = 让它自己跑；再点 = 切回手动（每轮停下等你）">⚡ 自动</button>
+    <button id="pastBtn" class="mini" title="回头看往期讨论的会议纪要 / 完整记录">📜 往期讨论</button>
     <button id="stopBtn" class="mini">🛑 结束议题</button>
   </div>
   <div class="inputbar">
@@ -469,6 +495,29 @@
     <div class="mfoot">
       <span class="hint" id="rHint">点头像 → 拖滑块，调这位 AI 的思考用量</span>
       <button id="rClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ⭐ 往期讨论：回头看得见"到底聊出了什么"（阿包 2026-10-11 要的） -->
+<div id="pastModal" class="modal hidden">
+  <div class="mbox pbox">
+    <div class="mhead">
+      <div class="mtitle">📜 往期讨论</div>
+      <div class="msub" id="pastSub">正在读取…</div>
+    </div>
+    <div class="plist" id="pastList"></div>
+    <div class="pdetail hidden" id="pastDetail">
+      <div class="pdhead">
+        <button class="ghost" id="pastBack">← 返回列表</button>
+        <span class="pdtitle" id="pastTitle"></span>
+        <button class="ghost" id="pastMode">看完整记录</button>
+      </div>
+      <div class="pdtext" id="pastText"></div>
+    </div>
+    <div class="mfoot">
+      <span class="hint">「会议纪要」= 结束后阿鱼整理的那份；没整理的场次可以看完整记录</span>
+      <button id="pastClose">关闭</button>
     </div>
   </div>
 </div>
@@ -1013,6 +1062,69 @@ paintAuto();
 fetch("/state").then(r => r.json())
   .then(s => { autoOn = !!s.auto; paintAuto(); })
   .catch(() => {});
+
+/* ⭐ 往期讨论：回头看得见"到底聊出了什么"（阿包 2026-10-11 —— 
+   原话：「只能看见讨论了多少轮，无法看见结果，好像意义不是特别大」） */
+const pastModal = document.getElementById("pastModal");
+const pastList = document.getElementById("pastList");
+const pastDetail = document.getElementById("pastDetail");
+const pastText = document.getElementById("pastText");
+const pastSub = document.getElementById("pastSub");
+const pastTitle = document.getElementById("pastTitle");
+const pastModeBtn = document.getElementById("pastMode");
+let pastCur = null, pastIsFull = false;
+
+function pastShowDetail(it, full) {
+  pastCur = it;
+  pastIsFull = !!full;
+  pastTitle.textContent = `${it.ts} · ${it.topic}`;
+  pastModeBtn.textContent = full ? "只看会议纪要" : "看完整记录";
+  pastText.textContent = "正在读取…";
+  pastList.classList.add("hidden");
+  pastDetail.classList.remove("hidden");
+  fetch(`/past?file=${encodeURIComponent(it.file)}&mode=${full ? "full" : "summary"}`)
+    .then(r => r.json())
+    .then(d => { pastText.textContent = d.text || "（读不到内容）"; })
+    .catch(e => { pastText.textContent = "读取失败：" + e; });
+}
+
+async function openPast() {
+  pastModal.classList.remove("hidden");
+  pastList.classList.remove("hidden");
+  pastDetail.classList.add("hidden");
+  pastSub.textContent = "正在读取…";
+  try {
+    const d = await fetch("/past").then(r => r.json());
+    const items = d.items || [];
+    pastList.innerHTML = "";
+    pastSub.textContent = items.length
+      ? `共 ${items.length} 场（新的在最上面）· 点一场看结果`
+      : "还没有往期记录 —— 跑一场就会有了";
+    items.forEach(it => {
+      const el = document.createElement("div");
+      el.className = "pitem";
+      el.innerHTML =
+        `<div class="pt">${esc(it.topic)}</div>` +
+        `<div class="pm">${esc(it.ts)} · ${it.rounds} 轮 · ${it.speakers.length} 位` +
+        `（${esc(it.speakers.join("、"))}） · ` +
+        (it.has_summary ? `<span class="psum">有会议纪要</span>`
+                        : `<span class="pno">没整理纪要</span>`) +
+        `</div>`;
+      el.onclick = () => pastShowDetail(it, false);
+      pastList.appendChild(el);
+    });
+  } catch (e) {
+    pastSub.textContent = "读取失败：" + e;
+  }
+}
+
+document.getElementById("pastBtn").onclick = openPast;
+document.getElementById("pastClose").onclick = () => pastModal.classList.add("hidden");
+document.getElementById("pastBack").onclick = () => {
+  pastDetail.classList.add("hidden");
+  pastList.classList.remove("hidden");
+};
+pastModeBtn.onclick = () => { if (pastCur) pastShowDetail(pastCur, !pastIsFull); };
 
 /* ⭐ 参会者一览：点头像 → 拖滑块调这位 AI 的「思考用量」（阿包 2026-10-11 要求）
    · 滑块像音量条一样**连续可调**（1000~16000，不设死档位）

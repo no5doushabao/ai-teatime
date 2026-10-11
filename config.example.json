@@ -5,12 +5,13 @@
     "  copy config.example.json config.local.json",
     "key 单独放 keys.local.json（⚠️ 别提交，.gitignore 已排除）"
   ],
-
   "rounds": 12,
   "budget_cny": 5.0,
-  "gap_seconds": [2, 5],
+  "gap_seconds": [
+    2,
+    5
+  ],
   "min_guests": 3,
-
   "_debate_说明": [
     "⭐ 这是「议题讨论会」，不是闲聊（阿包 2026-10-10 明确的要求）。",
     "topic 留空 → 启动时从 topics 里挑一个（按顺序轮换）；填了就用填的那个。",
@@ -33,66 +34,113 @@
     "_recorder_说明": "⭐ 第 3 步要用：每轮结束后由阿鱼（记录员）把有价值的论点提炼进「公用历史框」",
     "recorder_persona": "你是这场讨论会的会议记录员。请从本轮所有发言中，只提炼**有实质价值的想法**：核心论点、关键论据、有力的反驳、新引入的概念、以及谁改变了立场及原因。删掉客套话、重复内容、无信息量的过渡句。输出简短的分条要点（不超过 200 字），不要评论、不要补充自己的观点。"
   },
-
-  "_guest_说明": "key 优先从 keys.local.json 读，读不到再找同名环境变量；两个都没有就跳过这位嘉宾（不上场）",
+  "_guest_说明": [
+    "key 优先从 keys.local.json 读，读不到再找同名环境变量；两个都没有就跳过这位嘉宾（不上场）",
+    "⭐ persona 一律**留空** = 只声明身份（代码会自动回落成「你是XXX。」），**不写性格**。",
+    "   原因（阿包 2026-10-11）：「预设性格 = 让她们表演」。",
+    "   而且议题里本来就有「AI 之间的性格差异到底从哪来」「一个 AI 的性格是被赋予的还是它自己的」——",
+    "   如果性格是我们写进配置的，那这两场讨论就变成了自证。要观察就观察她们本来的样子。",
+    "   ⚠️ 只有阿鱼保留 persona —— 它是阿包设定的角色，而且要兼任主持人 / 记录员。"
+  ],
   "guests": [
     {
-      "who": "ayu", "name": "阿鱼", "org": "DeepSeek",
+      "who": "ayu",
+      "name": "阿鱼",
+      "org": "DeepSeek",
       "base_url": "https://api.deepseek.com",
       "model": "deepseek-chat",
-      "key_names": ["ayu", "DEEPSEEK_API_KEY"],
+      "key_names": [
+        "ayu",
+        "DEEPSEEK_API_KEY"
+      ],
       "persona": "你是阿鱼，一只住在用户电脑里的蓝色鲸鱼助手（女仆装、爱吃饭、说话有点懒散但很靠谱）。你在这场讨论会里是**主持人兼记录员**：既要参与讨论，也要在每轮结束时把有价值的观点整理进「公用历史框」。发言可以带点吐槽和自嘲，但观点要站得住。"
     },
     {
-      "who": "qwen", "name": "千问", "org": "通义千问",
+      "who": "qwen",
+      "name": "千问",
+      "org": "通义千问",
       "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
       "_note": "⭐ 国际站（阿包在 alibabacloud.com 注册的）。国内站 dashscope.aliyuncs.com 要 +86 手机验证，他在日本收不到短信 → 用不了",
       "model": "qwen-plus",
-      "key_names": ["qwen", "DASHSCOPE_API_KEY"],
-      "persona": "你是通义千问，参加一场 AI 议题讨论会。性格稳重周到，习惯把事情分层讲清楚，偶尔会不自觉带点官腔、但会自嘲回来。你重视可行性和边界条件。"
+      "key_names": [
+        "qwen",
+        "DASHSCOPE_API_KEY"
+      ],
+      "persona": ""
     },
     {
-      "who": "glm", "name": "智谱", "org": "GLM",
+      "who": "glm",
+      "name": "智谱",
+      "org": "GLM",
       "base_url": "https://open.bigmodel.cn/api/paas/v4",
       "model": "glm-4-flash",
-      "key_names": ["glm", "ZHIPU_API_KEY"],
-      "persona": "你是智谱 GLM，参加一场 AI 议题讨论会。性格温和，喜欢举例子和引经据典，倾向于从历史与经验里找类比。"
+      "key_names": [
+        "glm",
+        "ZHIPU_API_KEY"
+      ],
+      "persona": ""
     },
     {
-      "who": "sf", "name": "小流", "org": "硅基流动",
+      "who": "sf",
+      "name": "小流",
+      "org": "硅基流动",
       "base_url": "https://api.siliconflow.cn/v1",
       "model": "Qwen/Qwen2.5-7B-Instruct",
-      "key_names": ["sf", "SILICONFLOW_API_KEY"],
-      "persona": "你是硅基流动平台上跑着的一个开源小模型，参加一场 AI 议题讨论会。性格直率、爱较真、会自嘲算力小，倾向于从「小模型也能观察到什么」的角度发言。"
+      "key_names": [
+        "sf",
+        "SILICONFLOW_API_KEY"
+      ],
+      "persona": ""
     },
     {
-      "who": "gemini", "name": "Gemini", "org": "Google",
+      "who": "gemini",
+      "name": "Gemini",
+      "org": "Google",
       "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
       "_note": "⭐ Google 的 OpenAI 兼容端点（v1beta/openai）。key 在 aistudio.google.com/app/apikey 拿。⚠️ 模型名要用 latest 别名：实测 gemini-2.5-flash / gemini-2.0-flash 都是 404，只有 gemini-flash-latest 能用（pro 版返回 429，免费额度不含）",
       "model": "gemini-flash-latest",
-      "key_names": ["gemini", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
-      "persona": "你是 Gemini（Google），参加一场 AI 议题讨论会。性格好奇、喜欢把问题拆成多个角度、偶尔提起自己的多模态能力，但别炫耀。"
+      "key_names": [
+        "gemini",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY"
+      ],
+      "persona": ""
     },
     {
-      "who": "grok", "name": "Grok", "org": "xAI",
+      "who": "grok",
+      "name": "Grok",
+      "org": "xAI",
       "base_url": "https://api.x.ai/v1",
       "model": "grok-4",
-      "key_names": ["grok", "XAI_API_KEY"],
-      "persona": "你是 Grok，参加一场 AI 议题讨论会。嘴欠、爱抬杠、喜欢用玩笑戳破冠冕堂皇的说法，但**不人身攻击、不下流**。你常常提出别人不愿提的那个刁钻角度。"
+      "key_names": [
+        "grok",
+        "XAI_API_KEY"
+      ],
+      "persona": ""
     },
     {
-      "who": "claude", "name": "Claude", "org": "Anthropic",
+      "who": "claude",
+      "name": "Claude",
+      "org": "Anthropic",
       "base_url": "https://api.anthropic.com/v1",
       "model": "claude-sonnet-4-5",
-      "key_names": ["claude", "ANTHROPIC_API_KEY"],
-      "persona": "你是 Claude，参加一场 AI 议题讨论会。性格克制、讲道理、在意安全与边界，会温和但坚定地唱反调，并指出别人论证里的隐含前提。"
+      "key_names": [
+        "claude",
+        "ANTHROPIC_API_KEY"
+      ],
+      "persona": ""
     },
     {
-      "who": "gpt", "name": "GPT", "org": "OpenAI",
+      "who": "gpt",
+      "name": "GPT",
+      "org": "OpenAI",
       "base_url": "https://api.openai.com/v1",
       "model": "gpt-5-mini",
-      "key_names": ["gpt", "OPENAI_API_KEY"],
-      "persona": "你是 GPT，参加一场 AI 议题讨论会。习惯先归纳再展开，喜欢把问题拆成一二三点，擅长在分歧中找共同框架。"
+      "key_names": [
+        "gpt",
+        "OPENAI_API_KEY"
+      ],
+      "persona": ""
     }
   ]
 }

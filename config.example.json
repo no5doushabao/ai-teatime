@@ -123,7 +123,8 @@
       "name": "Claude",
       "org": "Anthropic",
       "base_url": "https://api.anthropic.com/v1",
-      "model": "claude-sonnet-4-5",
+      "_note": "⭐ Anthropic 官方端点**不是** OpenAI 兼容的（走 /messages + x-api-key + anthropic-version，system 还得放顶层）——代码里有一条专门的协议分支，base_url 含 anthropic.com 就自动走它。模型名（2026-10 现行）：claude-fable-5-1（最强最贵）/ claude-opus-5-5 / **claude-sonnet-5-5（速度+智能，推荐）** / claude-haiku-5-5（最便宜）；旧的 claude-sonnet-4-5 已弃用。⚠️ 这些模型带自适应思考，思考 token 与正文**共用 max_tokens** —— 在「参会者一览」里给它调到 8000 左右。",
+      "model": "claude-sonnet-5-5",
       "key_names": [
         "claude",
         "ANTHROPIC_API_KEY"

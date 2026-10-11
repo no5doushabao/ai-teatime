@@ -141,6 +141,10 @@ def load_roster() -> list:
         item = dict(g)
         item["key"] = key
         item["ready"] = bool(key)
+        # ⭐ config 里显式写了 api 的，记进 URL 表 —— llm_call() 照它选协议（见 _api_style）
+        if (g.get("api") or "").strip():
+            _URL_API[(g.get("base_url") or "").rstrip("/")] = _api_style(
+                g.get("base_url"), g.get("api"))
         out.append(item)
     return out
 
@@ -899,10 +903,122 @@ def _server_wait_hint(e, detail: str):
     return None
 
 
+ANTHROPIC_VERSION = "2023-06-01"     # 官方要求的版本头（他们保证向后兼容，写死即可）
+
+
+# ⭐ config 里显式声明了 `api` 的嘉宾，按 base_url 记一张表 ——
+#    这样 llm_call() 的 6 个调用点**不用**都去传 api 参数（少改一处、少一堆出错机会）
+_URL_API = {}
+
+
+def _api_style(base_url: str, api: str = "") -> str:
+    """这家该走哪套协议？`openai`（默认，/chat/completions）还是 `anthropic`（/messages）。
+
+    ⭐ 2026-10-11 晚加：克劳德来了，但 **Anthropic 官方端点不是 OpenAI 兼容的** ——
+       路径不一样（`/messages`）、认证不一样（`x-api-key` + `anthropic-version` 两个头）、
+       连 system 提示词都得从 messages 里拎出来放顶层。
+    判断顺序：① 调用时显式传的 `api` ② config 里声明过（load_roster 填的表）
+              ③ 按域名猜（含 anthropic.com → 原生）④ 其余按 OpenAI 兼容。
+    """
+    a = (api or "").strip().lower()
+    if a in ("anthropic", "claude", "messages"):
+        return "anthropic"
+    if a in ("openai", "oai", "compat"):
+        return "openai"
+    known = _URL_API.get((base_url or "").rstrip("/"))
+    if known:
+        return known
+    return "anthropic" if "anthropic.com" in (base_url or "").lower() else "openai"
+
+
+def _pick_anthropic_text(data: dict) -> str:
+    """从 Anthropic 的 /messages 响应里取正文（正文是个 block 数组，不是一句字符串）。"""
+    blocks = data.get("content")
+    if not isinstance(blocks, list) or not blocks:
+        raise RuntimeError(f"响应里没有 content：{json.dumps(data, ensure_ascii=False)[:200]}")
+    parts = [b.get("text") for b in blocks
+             if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)]
+    return "\n".join(p for p in parts if p).strip()
+
+
+def _anthropic_call(base_url: str, model: str, api_key: str, messages: list,
+                    timeout: int, temperature: float, max_tokens) -> str:
+    """调一次 Anthropic 原生 `/messages`（纯 urllib，零依赖）。
+
+    ⚠️ 三处跟 OpenAI 不一样（前两条不照做就直接 400）：
+      1. **`system` 是顶层字段** —— 不能当 messages 里的一条
+      2. **`max_tokens` 必填** —— 不传就报错，所以这里给个兜底 4000
+      3. 认证是 `x-api-key` + `anthropic-version` 两个头，**不是** `Authorization: Bearer`
+    退避重试的规矩跟 OpenAI 那条完全一致（429/5xx/网络异常重试，且优先听服务端建议的等待时间）。
+    """
+    url = base_url.rstrip("/") + "/messages"
+    system = "\n\n".join(m.get("content") or "" for m in messages
+                         if m.get("role") == "system").strip()
+    conv = [{"role": m["role"], "content": m.get("content") or ""}
+            for m in messages if m.get("role") in ("user", "assistant")]
+    payload = {
+        "model": model,
+        "max_tokens": int(max_tokens or 4000),          # ⚠️ 必填
+        "messages": conv or [{"role": "user", "content": "（继续）"}],
+    }
+    if system:
+        payload["system"] = system
+    if temperature is not None:
+        payload["temperature"] = max(0.0, min(1.0, float(temperature)))   # Anthropic 只收 0~1
+    headers = {"x-api-key": api_key, "anthropic-version": ANTHROPIC_VERSION,
+               "Content-Type": "application/json"}
+
+    last = None
+    tried_no_temp = False
+    for attempt in range(len(RETRY_WAITS) + 1):
+        try:
+            req = urllib.request.Request(
+                url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return _pick_anthropic_text(json.loads(resp.read().decode("utf-8")))
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", "replace")
+            except Exception:
+                pass
+            last = urllib.error.HTTPError(e.url, e.code, f"{e.reason} | {detail[:600]}",
+                                          e.headers, None)
+            # ⭐ 带「自适应思考」的模型可能不收自定义 temperature → 摘掉它**立刻**重试一次。
+            #    这种 400 靠退避没用，得改参数（跟 OpenAI 那条踩过的"参数不被支持"同类）。
+            if (e.code == 400 and not tried_no_temp and "temperature" in detail.lower()
+                    and "temperature" in payload):
+                payload.pop("temperature", None)
+                tried_no_temp = True
+                continue
+            if e.code in RETRY_CODES and attempt < len(RETRY_WAITS):
+                wait = RETRY_WAITS[attempt]
+                hint = _server_wait_hint(e, detail)
+                if hint:
+                    wait = max(wait, min(hint + 1, RETRY_MAX_WAIT))
+                why = "限流(429)" if e.code == 429 else str(e.code)
+                say("system", f"⏳ {model} 撞到 {why}，{wait:.0f} 秒后重试（第 {attempt + 2} 次）"
+                              + ("　← 按服务端给的等待时间" if hint else ""), "system")
+                time.sleep(wait)
+                continue
+            raise last
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last = e
+            if attempt < len(RETRY_WAITS):
+                wait = RETRY_WAITS[attempt]
+                say("system", f"⏳ {model} 网络异常（{type(e).__name__}），{wait} 秒后重试",
+                    "system")
+                time.sleep(wait)
+                continue
+            raise
+    raise last if last else RuntimeError("_anthropic_call: 没有成功过一次")
+
+
 def llm_call(base_url: str, model: str, api_key: str, messages: list,
              timeout: int = 180, temperature: float = 0.9,
-             max_tokens: int = None) -> str:
-    """调一次 OpenAI 兼容的 /chat/completions。
+             max_tokens: int = None, api: str = "") -> str:
+    """调一次模型：默认走 OpenAI 兼容的 `/chat/completions`；Anthropic 端点走原生 `/messages`。
 
     ⚠️ 2026-10-10 实测踩到两个"各家参数不统一"的坑（都在 GPT-5 系列上）：
       1. **不收自定义 temperature** → 400
@@ -910,9 +1026,13 @@ def llm_call(base_url: str, model: str, api_key: str, messages: list,
       2. **也不收 max_tokens**，改叫 **max_completion_tokens** → 400
          "Unsupported parameter: 'max_tokens' is not supported with this model..."
 
-    所以这里**穷举几种参数组合**：撞到"参数不支持"就换下一套；命中后把成功的那套
+    所以 OpenAI 这条**穷举几种参数组合**：撞到"参数不支持"就换下一套；命中后把成功的那套
     记进 `_PARAM_STYLE`，之后的发言直接用，不再来回试错。
+    （Anthropic 那条参数是固定的，不必穷举 —— 见 `_anthropic_call()`。）
     """
+    if _api_style(base_url, api) == "anthropic":
+        return _anthropic_call(base_url, model, api_key, messages,
+                               timeout, temperature, max_tokens)
     url = base_url.rstrip("/") + "/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 

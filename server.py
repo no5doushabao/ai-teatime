@@ -1666,10 +1666,25 @@ def summarize_debate() -> str:
     日志文件才是整场最完整的记录（而且它在磁盘上，随时能重跑总结）。
     """
     global _last_log_path
-    if not _last_log_path or not Path(_last_log_path).exists():
+    p = Path(_last_log_path) if _last_log_path else None
+    if p is None or not p.exists():
+        # ⭐ 兜底：服务一重启 `_last_log_path` 就没了，可阿包可能还想整理**刚才那场** ——
+        #    去 logs/ 里挑最近修改的、**真有内容**的那个（跳过空壳）。
+        d = ROOT / "logs"
+        cands = sorted(d.glob("*.md"), key=lambda x: x.stat().st_mtime, reverse=True) \
+            if d.exists() else []
+        for c in cands:
+            try:
+                t = c.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            if "—— 第 " in t or "会议纪要（阿鱼整理）" in t:
+                p = c
+                break
+    if p is None or not p.exists():
         say("system", "（找不到这场讨论的记录文件，没法整理）", "system")
         return ""
-    body = Path(_last_log_path).read_text(encoding="utf-8", errors="replace")
+    body = p.read_text(encoding="utf-8", errors="replace")
     if len(body) > 40000:                      # 太长就保头保尾（省 token，别丢关键部分）
         body = body[:20000] + "\n\n…（中间省略）…\n\n" + body[-20000:]
 
@@ -1703,7 +1718,7 @@ def summarize_debate() -> str:
 
     # ⭐ 总结也落盘（追加到同一场的日志后面），并广播到界面
     try:
-        with Path(_last_log_path).open("a", encoding="utf-8") as f:
+        with p.open("a", encoding="utf-8") as f:      # ⚠️ 用兜底挑出来的那个 p，别再读全局
             f.write("\n\n---\n\n# 📝 会议纪要（阿鱼整理）\n\n" + text.strip() + "\n")
     except Exception:
         pass
@@ -1805,9 +1820,20 @@ def idle_loop(roster: list, settings: dict) -> None:
     while True:
         if _start_event.is_set() and len(live_ready()) >= settings["min_guests"]:
             fresh = _start_settings or settings      # ⭐ 用按下开场那一刻的配置（议题可能是刚选的）
+            _start_event.clear()                     # ⭐ 消费掉这次开场（以前是 return，不用清）
             say("system", f"阿包按了开场键 —— 议题：{fresh['topic']}", "system")
             RealTable(roster, fresh).run()
-            return
+            # ⭐⭐ 跑完**回到待机**，不是退出线程（2026-10-12 凌晨修）
+            #   以前这里直接 `return`，于是讨论一结束这个线程就没了 ——
+            #   阿包在旁听席说话**没有任何人理**（他截图问：「她俩好像看不见我的话了」）。
+            #   开新场、继续说话、把人请回来……全都得靠这个循环活着才有意义。
+            _stop_event.clear()                      # 清掉上一场的"结束"信号
+            ready = live_ready()
+            names = "、".join(g["name"] for g in ready) or "（空场）"
+            say("system", f"🍵 这一场结束了，回到待机 —— 在场：{names}。"
+                          f"可以直接说话（在场的会回你），也可以点上方「🍵 开场 / 换议题」开新的一场",
+                "system")
+            continue
         time.sleep(1.0)
         with _lock:
             pending = list(_boss_inbox)
@@ -2319,6 +2345,7 @@ def main() -> None:
             idle_loop(roster, settings)
         else:
             RealTable(roster, settings).run()
+            idle_loop(roster, settings)      # ⭐ 自动开场跑完，也回到待机（别让线程就这么没了）
 
     threading.Thread(target=boot, daemon=True).start()
 

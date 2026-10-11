@@ -572,6 +572,11 @@ function paintStartBtn() {
   const n = topicDebates[pickedTopic] || 0;
   mStart.textContent = n ? "继续讨论" : "开始讨论";
   mStart.title = n ? `这条已经讨论过 ${n} 场 —— 接着聊` : "";
+  // ⭐ 「预设轮数」这个框，在"继续讨论"时含义不一样（阿包 2026-10-11 晚定的）：
+  //    不是"这场再聊几轮"，而是**整个议题聊到第几轮为止** —— 提示措辞得跟着变
+  const ri = document.getElementById("roundsInput");
+  if (ri) ri.title = n ? "整个议题聊到第几轮为止（接着上次往下数）"
+                       : "这场讨论跑多少轮（1~99）";
 }
 
 function showModal() { modal.classList.remove("hidden"); }

@@ -1040,8 +1040,11 @@ class RealTable:
         self.over_budget = False
         # ⭐ 「继续讨论」的轮号衔接：上次聊到第 N 轮，本场就从第 N+1 轮接着数
         #    （对外显示的轮号 = 累计轮号；而战绩表里记的仍是**本场**轮数，不然会重复累加）
+        # ⚠️ 预设轮数的语义（阿包 2026-10-11 晚定）：**整个议题聊到第几轮为止**，不是"这场再聊几轮"。
+        #    上次聊了 2 轮 + 预设 5 轮 → 这一场只跑 3、4、5（3 轮），**不是** 3~7。
+        #    万一预设值已经不大于"上次聊到的轮次"，至少也让这一轮能开起来（否则本场 0 轮）。
         self.round_offset = max(0, int(settings.get("resume_from") or 0))
-        self.end_round = self.round_offset + max(1, int(settings.get("rounds") or 1))
+        self.end_round = max(int(settings.get("rounds") or 1), self.round_offset + 1)
         # ⭐ 被"请下场"的嘉宾：who -> 连续失败次数（阿包 10-11 那场：Gemini 从第 3 轮起
         #    每轮都撞 429，三次退避全落在同一个限流窗口里 → 每轮白等 70 秒，一直等到散场）
         self.sidelined = {}
@@ -1106,7 +1109,8 @@ class RealTable:
             "topic": self.settings["topic"],
             "topic_index": self.settings.get("topic_index", 0),
             "rounds_done": 0,
-            "rounds_planned": self.settings["rounds"],
+            # ⭐ 记**本场**计划跑几轮（继续讨论时 = 预设轮数 - 上次聊到的轮次）
+            "rounds_planned": max(1, self.end_round - self.round_offset),
             "participants": [g["name"] for g in self.roster],
             "started": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "finished": None,
@@ -1199,7 +1203,8 @@ class RealTable:
         if recap:
             self.notes = recap + "\n"
             brief = recap[:200].replace("\n", " ")
-            tail = (f"（上次聊到第 {self.round_offset} 轮，本场从第 {self.round_offset + 1} 轮接着数）"
+            tail = (f"（上次聊到第 {self.round_offset} 轮，本场从第 {self.round_offset + 1} 轮接着数 —— "
+                    f"按预设轮数，整个议题聊到第 {self.end_round} 轮收尾）"
                     if self.round_offset else "")
             say("system", f"📜 接着上一次聊 —— 已把{s.get('recap_from') or '上一次的记录'}"
                           f"翻出来放进公用历史框（{len(recap)} 字）{tail}。开头是：\n{brief}…", "system")
@@ -1322,8 +1327,13 @@ class RealTable:
             if not self._pause_between_rounds(r):
                 return
 
-        self._hist_progress(s["rounds"], finished=True)      # ⭐ 议题库要能看出"讨论完了没"
-        say("system", f"讨论结束（{s['rounds']} 轮）· 粗估 {self.spent_tokens} tokens", "system")
+        done = max(1, self.end_round - self.round_offset)     # 本场实际跑了几轮
+        self._hist_progress(done, finished=True)              # ⭐ 议题库要能看出"讨论完了没"
+        if self.round_offset:
+            say("system", f"讨论结束（本场 {done} 轮 · 这个议题累计聊到第 {self.end_round} 轮）"
+                          f"· 粗估 {self.spent_tokens} tokens", "system")
+        else:
+            say("system", f"讨论结束（{done} 轮）· 粗估 {self.spent_tokens} tokens", "system")
 
 
 def _round_no_global(r: int) -> None:
@@ -1946,15 +1956,27 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception:
                 pass
             # ⭐ 阿包在界面上选好了议题再按开场
-            if isinstance(payload.get("topic_index"), int):
-                _chosen_topic_index = max(0, int(payload["topic_index"]))
-                say("system", f"📌 阿包选定了议题 {_chosen_topic_index + 1}：{load_settings()['topic']}", "system")
+            picked = payload.get("topic_index")
+            if isinstance(picked, int):
+                _chosen_topic_index = max(0, int(picked))
             # ⭐ 预设轮数（议题框里那个小输入框）：有值就盖过 config 的 rounds
             _r = payload.get("rounds")
-            if isinstance(_r, int) and not isinstance(_r, bool):
+            has_rounds = isinstance(_r, int) and not isinstance(_r, bool)
+            if has_rounds:
                 _rounds_override = max(1, min(99, int(_r)))
-                say("system", f"🔢 本场预设轮数：{_rounds_override} 轮", "system")
             start_requested(bool(payload.get("resume")))
+            # ⚠️ 这两条播报放在 start_requested() **之后**：它会重开本场日志文件，
+            #    放前面的话，换议题时这两条会写进**上一场**的记录里（2026-10-11 晚发现的）。
+            #    放后面还有个好处：能读到本场配置里的 resume_from，把轮数说准。
+            if isinstance(picked, int):
+                say("system", f"📌 阿包选定了议题 {_chosen_topic_index + 1}："
+                              f"{load_settings()['topic']}", "system")
+            if has_rounds:
+                off = int(_start_settings.get("resume_from") or 0)
+                say("system", (f"🔢 预设轮数：{_rounds_override} —— 接着上次聊，"
+                               f"整个议题聊到第 {_rounds_override} 轮为止"
+                               f"（本场 {max(1, _rounds_override - off)} 轮）"
+                               if off else f"🔢 本场预设轮数：{_rounds_override} 轮"), "system")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()

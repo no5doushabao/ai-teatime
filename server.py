@@ -580,6 +580,86 @@ def save_history(h: dict) -> None:
         pass
 
 
+# ── ⭐ 「继续讨论」：把上一次的记录翻出来（阿包 2026-10-11 晚要的）──────
+#   原话：「需要把之前的记录翻出来呢，要不然就不是继续聊，而是重新聊了」
+RECAP_MAX = 4000        # 前情提要最多带这么多字（省 token，别把上下文撑爆）
+
+
+def log_safe_topic(topic: str) -> str:
+    """议题名在日志文件名里的样子 —— 跟 `init_log()` 用**同一套**规范化。"""
+    return re.sub(r'[\\/:*?"<>|\s]+', "-", (topic or "debate")).strip("-")[:26] or "debate"
+
+
+def find_debates(topic: str, exclude=None) -> list:
+    """列出某个议题的**所有**日志文件，**新的在前**。
+
+    ⚠️ 不能靠日志里那行"议题：xxx"来匹配 —— `list_past_debates()` 反推出来的议题名
+       被换过空格、还截断过，比不准。这里直接比**文件名里的规范名**：
+       两边都用 `log_safe_topic()` 算，名字对得上就是对得上。
+
+    ⚠️ `exclude` 要传**本场刚开的那个日志**（`_log_path`）—— 这个坑真踩到了：
+       开场流程是先 `init_log()` 建本场文件、再回头翻"上一次"，而新建的文件名时间戳最新，
+       于是"上一次"永远翻到自己那个空壳，`build_recap()` 恒返回空（本地验证脚本抓出来的）。
+    """
+    d = ROOT / "logs"
+    if not d.exists():
+        return []
+    ex = Path(exclude).resolve() if exclude else None
+    want = log_safe_topic(topic)
+    hits = []
+    for p in d.glob("*.md"):
+        if ex is not None and p.resolve() == ex:
+            continue
+        m = re.match(r"^(\d{8}-\d{6})-(.+)$", p.stem)
+        if not m:
+            continue
+        # 剥掉 init_log() 的 -2 / -3 重名后缀再比
+        if re.sub(r"-\d+$", "", m.group(2)) == want:
+            hits.append((m.group(1), p))
+    return [p for _, p in sorted(hits, key=lambda x: x[0], reverse=True)]
+
+
+def find_last_debate(topic: str, exclude=None):
+    """某个议题**最近一场**的日志（找不到返回 None）—— 就是 `find_debates()` 的第一个。"""
+    hits = find_debates(topic, exclude=exclude)
+    return hits[0] if hits else None
+
+
+def build_recap(topic: str, exclude=None):
+    """⭐ 翻出上一次聊这个议题的要点，做成"前情提要"。返回 `(文本, 来源说明)`。
+
+    文本为空 = 没翻到（这一场只能当新议题聊）。取法优先拿**已经提炼过的**（省 token）：
+      ① 上一场结尾的**会议纪要**（阿鱼整理的那份大总结）
+      ② 没纪要就拼各轮的**公用历史框小纪要**
+
+    ⚠️ 会**一场一场往前翻**：最近那场如果是"空壳"（只点了开场、一轮没跑起来），
+       就继续找更早的 —— 否则明明有真记录，却因为最近一个是空的而用不上。
+    """
+    for p in find_debates(topic, exclude=exclude):
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        s = p.stem
+        when = f"{s[:4]}-{s[4:6]}-{s[6:8]} {s[9:11]}:{s[11:13]}"
+
+        mark = "# 📝 会议纪要（阿鱼整理）"
+        if mark in txt:
+            rec = txt.split(mark, 1)[1].strip()
+            if rec:
+                return (f"【上一次（{when}）的会议纪要 · 阿鱼整理】\n{rec}"[:RECAP_MAX],
+                        f"{when} 那场的会议纪要")
+
+        notes = [(n, t.strip()) for n, t in
+                 re.findall(r"📝 第 (\d+) 轮纪要（写入公用历史框）：\n(.*?)(?=\n- \*\*|\Z)", txt, re.S)
+                 if t.strip()]
+        if notes:
+            body = (f"【上一次（{when}）的逐轮要点】\n" +
+                    "\n\n".join(f"### 第 {n} 轮\n{t}" for n, t in notes))
+            return body[:RECAP_MAX], f"{when} 那场的逐轮要点（{len(notes)} 轮）"
+    return "", ""
+
+
 # ── ⭐ 往期讨论（阿包 2026-10-11 下午要的）──────────────────────────
 #   原话：「用户只能看见讨论了多少轮，但是无法看见结果，好像意义不是特别大」
 #   数据就在 logs/*.md 里（每场一个文件，纪要在末尾），这里只是给它开个门。
@@ -1102,6 +1182,14 @@ class RealTable:
         say("system", f"本次议题：{s['topic']}", "system")
         say("system", f"规则：每轮每人各发言一次，每次至少 {s['min_chars']} 字；"
                       f"发言前须读完本轮已发言的全部内容", "system")
+        # ⭐ 「继续讨论」：上一次的要点已经翻出来了 → 当作本场**公用历史框的起点**
+        #    （公用历史框本来就每轮往上累积，这里只是给它一个不为空的开头）
+        recap = (s.get("recap") or "").strip()
+        if recap:
+            self.notes = recap + "\n"
+            brief = recap[:200].replace("\n", " ")
+            say("system", f"📜 接着上一次聊 —— 已把{s.get('recap_from') or '上一次的记录'}"
+                          f"翻出来放进公用历史框（{len(recap)} 字）。开头是：\n{brief}…", "system")
         self._hist_begin()             # ⭐ 记一笔：议题 / 参与者 / 计划轮数
 
         # ⭐ 第一轮谁先开口（2026-10-11 修）：**命题人优先** —— 他在桌上就让他先讲；
@@ -1390,13 +1478,17 @@ def summarize_debate() -> str:
     return text
 
 
-def start_requested() -> None:
+def start_requested(resume: bool = False) -> None:
     """阿包在界面上点了「开场」→ 让待机中的场子立刻开（人数够的话）。
 
     ⚠️ 两件必须重做的事（都踩过）：
       1. **重新读配置** —— settings 是服务启动时读的，而阿包可能刚换了议题；
          不重读的话，顶栏显示新议题、讨论却还在聊旧的。
       2. **重开日志文件** —— 否则会出现"文件名叫议题 1、内容却是议题 5"（日志名是启动时定的）。
+
+    ⭐ `resume=True` = 他点的是「继续讨论」（这条议题聊过）：把上一次的要点翻出来，
+       塞进本场配置的 `recap` —— `RealTable.run()` 拿它当**公用历史框的起点**，
+       于是 AI 们第 1 轮就"记得"上次聊到哪儿了（阿包：「要不然就不是继续聊，而是重新聊了」）。
     """
     global _start_settings, _log_path, _last_log_path
     _start_settings = load_settings()
@@ -1404,6 +1496,20 @@ def start_requested() -> None:
     if _log_path is None or want[:18] not in str(_log_path.name):
         init_log(want)
     _last_log_path = _log_path       # ⭐ 记下来：阿包点「整理会议记录」时读它
+
+    # ⭐ 前情提要：放在 init_log() **之后** —— 这样"没翻到"那条提示会写进本场日志，
+    #    而不是写进上一场（那会把上一场的记录尾巴弄脏）
+    _start_settings.pop("recap", None)
+    _start_settings.pop("recap_from", None)
+    if resume:
+        # ⚠️ exclude=_log_path 不能省：本场日志刚刚才建出来，时间戳最新，
+        #    不排除掉的话"上一次"翻到的是它自己（空的）
+        recap, src = build_recap(want, exclude=_log_path)
+        if recap:
+            _start_settings["recap"], _start_settings["recap_from"] = recap, src
+        else:
+            say("system", "📜 想接着上次聊，但没翻到上一次的记录 —— 这一场只能从头来", "system")
+
     _stop_event.clear()              # ⭐ 新一场开始，清掉上一场的"结束"信号
     _start_event.set()
 
@@ -1811,7 +1917,7 @@ class Handler(SimpleHTTPRequestHandler):
             if isinstance(_r, int) and not isinstance(_r, bool):
                 _rounds_override = max(1, min(99, int(_r)))
                 say("system", f"🔢 本场预设轮数：{_rounds_override} 轮", "system")
-            start_requested()
+            start_requested(bool(payload.get("resume")))
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()

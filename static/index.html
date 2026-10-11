@@ -974,10 +974,13 @@ mStart.onclick = async () => {
     document.getElementById("topicBar").classList.add("on");
   }
   hideModal();
+  // ⭐ 这条议题聊过（按钮此刻写的是「继续讨论」）→ 让服务端把上一次的记录翻出来当前情，
+  //    不然就只是"换了个人重新聊一遍"（阿包的原话）
+  const resume = (topicDebates[pickedTopic] || 0) > 0;
   await fetch("/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ topic_index: pickedTopic, rounds: readRounds() })
+    body: JSON.stringify({ topic_index: pickedTopic, rounds: readRounds(), resume })
   });
 };
 document.getElementById("mClose").onclick = hideModal;

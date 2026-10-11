@@ -68,8 +68,17 @@ _log_path = None       # ⭐ 由 main() 决定：**每场讨论一个文件**（
 
 
 def init_log(topic: str) -> Path:
-    """开一场新的日志文件（logs/日期-时间-议题.md）。返回路径，同时设好全局 _log_path。"""
+    """开一场新的日志文件（logs/日期-时间-议题.md）。返回路径，同时设好全局 _log_path。
+
+    ⚠️ **讨论进行中拒绝切换日志文件**（2026-10-12 凌晨加的双保险）：
+       `broadcast()` 是往全局 `_log_path` 里写的，讨论期间一旦被切走，
+       本场剩下的发言就会落到另一场的文件里（"串场"，真发生过）。
+       正常情况下 `start_requested()` 已经把这条路堵住了，这里再兜一层。
+    """
     global _log_path
+    if _debating and _log_path is not None:
+        print(f"⚠️ 讨论进行中，拒绝切换日志文件（本场仍是 {_log_path.name}）")
+        return _log_path
     d = ROOT / "logs"
     d.mkdir(exist_ok=True)
     safe = re.sub(r'[\\/:*?"<>|\s]+', "-", (topic or "debate")).strip("-")[:26] or "debate"
@@ -1311,6 +1320,22 @@ class RealTable:
         return True
 
     def run(self) -> None:
+        """⭐ 外面这层只管一件事：把「讨论中」的标志（`_debating`）立起来、放下去。
+
+        讨论进行中不许再开场（`start_requested()` 会拦），本场的日志也就不会被切到别处去
+        —— 2026-10-12 凌晨那次"两场撞车"就是这么修掉的。
+
+        ⚠️ `try/finally` 必须写：底下的 `_run_inner()` 里有十几个 `return`，
+           任何一条路径漏了标志复位，待机就会永远卡在"这场还在跑"上。
+        """
+        global _debating
+        _debating = True
+        try:
+            self._run_inner()
+        finally:
+            _debating = False
+
+    def _run_inner(self) -> None:
         s = self.settings
         names = "、".join(g["name"] for g in self.roster)
         say("system", f"📋 议题讨论会开始 · 圆桌制（{len(self.roster)} 位：{names}）", "system")
@@ -1532,6 +1557,11 @@ _last_log_path = None             # ⭐ 最近一场的日志路径（做总结�
 _auto_next = False
 _next_round = threading.Event()   # 阿包点了「开始下一轮」→ 放行
 _next_waiting = False             # 现在是不是正卡在"等下一轮"上（界面上要显示）
+# ⭐ 现在有没有一场在跑（2026-10-12 凌晨加）：
+#    讨论进行中**不许再开场** —— 待机线程跑完一场就退出了（idle_loop 里 run() 之后 return），
+#    所以那时再点「开场」，事件根本没人在接：点了像没点，还会把本场日志切到新议题的文件上
+#    （阿包和我同时操作那一次：他那场没跑起来，我那场的发言写进了他的日志里）。
+_debating = False
 
 
 def _wait_next_round(r: int, table) -> str:
@@ -1622,8 +1652,15 @@ def summarize_debate() -> str:
     return text
 
 
-def start_requested(resume: bool = False) -> None:
+def start_requested(resume: bool = False) -> bool:
     """阿包在界面上点了「开场」→ 让待机中的场子立刻开（人数够的话）。
+
+    返回 `True` = 排上了；`False` = 被拦下（原因已经 say 到界面上）。
+
+    ⭐ **讨论进行中不许再开新场**（2026-10-12 凌晨加）：
+       待机线程跑完一场就 `return` 了（见 `idle_loop`），所以讨论中再点开场，
+       事件根本没人在接 —— 点了像没点；更糟的是它还会重开日志文件，
+       把本场剩下的发言写进新议题的记录里（阿包和我同时操作那次就撞出了这个）。
 
     ⚠️ 两件必须重做的事（都踩过）：
       1. **重新读配置** —— settings 是服务启动时读的，而阿包可能刚换了议题；
@@ -1635,6 +1672,11 @@ def start_requested(resume: bool = False) -> None:
        于是 AI 们第 1 轮就"记得"上次聊到哪儿了（阿包：「要不然就不是继续聊，而是重新聊了」）。
     """
     global _start_settings, _log_path, _last_log_path
+    # ⭐ 讨论进行中 → 拦住，并告诉他该怎么做（别静默无效，也别替他中断正在说话的人）
+    if _debating:
+        say("system", "⚠️ 这一场还在跑 —— 想换议题就先点底部的「🛑 结束议题」，"
+                      "等这场收尾了再开新的", "system")
+        return False
     _start_settings = load_settings()
     want = _start_settings["topic"]
 
@@ -1679,6 +1721,7 @@ def start_requested(resume: bool = False) -> None:
 
     _stop_event.clear()              # ⭐ 新一场开始，清掉上一场的"结束"信号
     _start_event.set()
+    return True
 
 
 def idle_loop(roster: list, settings: dict) -> None:
@@ -1711,8 +1754,10 @@ def idle_loop(roster: list, settings: dict) -> None:
             try:
                 t = llm_call(g["base_url"], g["model"], g["key"], [
                     {"role": "system", "content": (g.get("persona") or "") +
-                     "\n\n现在是茶话会的待机时间，其他人还没到。阿包（人类，在旁听席）跟你说话，"
-                     "请直接回应他，一到三句，别写小作文。"},
+                     "\n\n现在是茶话会的待机时间（还没正式开场）。阿包（人类，在旁听席）跟你说话，"
+                     "请直接回应他，一到三句，别写小作文。"
+                     "⚠️ 别猜「谁到没到」—— 在场的人由系统标在界面上，你看不到就别提这茬"
+                     "（旧文案写着「其他人还没到」，害小克当众说错了话）。"},
                     {"role": "user", "content": q},
                 ])
             except Exception as e:
@@ -2084,23 +2129,26 @@ class Handler(SimpleHTTPRequestHandler):
             has_rounds = isinstance(_r, int) and not isinstance(_r, bool)
             if has_rounds:
                 _rounds_override = max(1, min(99, int(_r)))
-            start_requested(bool(payload.get("resume")))
+            ok = start_requested(bool(payload.get("resume")))
             # ⚠️ 这两条播报放在 start_requested() **之后**：它会重开本场日志文件，
             #    放前面的话，换议题时这两条会写进**上一场**的记录里（2026-10-11 晚发现的）。
             #    放后面还有个好处：能读到本场配置里的 resume_from，把轮数说准。
-            if isinstance(picked, int):
+            #    ⚠️ 被拦下（ok=False）时**不能说"选定了议题"** —— 否则他以为开起来了
+            if ok and isinstance(picked, int):
                 say("system", f"📌 阿包选定了议题 {_chosen_topic_index + 1}："
                               f"{load_settings()['topic']}", "system")
-            if has_rounds:
+            if ok and has_rounds:
                 off = int(_start_settings.get("resume_from") or 0)
                 say("system", (f"🔢 预设轮数：{_rounds_override} —— 接着上次聊，"
                                f"整个议题聊到第 {_rounds_override} 轮为止"
                                f"（本场 {max(1, _rounds_override - off)} 轮）"
                                if off else f"🔢 本场预设轮数：{_rounds_override} 轮"), "system")
             self.send_response(200)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            body = json.dumps({"ok": ok}, ensure_ascii=False).encode("utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(b'{"ok":true}')
+            self.wfile.write(body)
             return
         if self.path == "/think_budget":           # ⭐ 参会者一览：调某位的思考用量
             n = int(self.headers.get("Content-Length", 0))

@@ -626,14 +626,18 @@ def find_last_debate(topic: str, exclude=None):
 
 
 def build_recap(topic: str, exclude=None):
-    """⭐ 翻出上一次聊这个议题的要点，做成"前情提要"。返回 `(文本, 来源说明)`。
+    """⭐ 翻出上一次聊这个议题的要点，做成"前情提要"。
+    返回 `(文本, 来源说明, 上次聊到第几轮)` —— 文本为空 = 没翻到（这一场只能当新议题聊）。
 
-    文本为空 = 没翻到（这一场只能当新议题聊）。取法优先拿**已经提炼过的**（省 token）：
+    取法优先拿**已经提炼过的**（省 token）：
       ① 上一场结尾的**会议纪要**（阿鱼整理的那份大总结）
       ② 没纪要就拼各轮的**公用历史框小纪要**
 
     ⚠️ 会**一场一场往前翻**：最近那场如果是"空壳"（只点了开场、一轮没跑起来），
        就继续找更早的 —— 否则明明有真记录，却因为最近一个是空的而用不上。
+
+    第三个返回值（上次那场日志里 `—— 第 N 轮 ——` 的最大 N）用来**接着数轮号**：
+       上次聊到第 2 轮 → 这一场从「第 3 轮」开始（阿包 10-11 晚：「想从第三轮开始」）。
     """
     for p in find_debates(topic, exclude=exclude):
         try:
@@ -642,13 +646,15 @@ def build_recap(topic: str, exclude=None):
             continue
         s = p.stem
         when = f"{s[:4]}-{s[4:6]}-{s[6:8]} {s[9:11]}:{s[11:13]}"
+        seen = [int(x) for x in re.findall(r"—— 第 (\d+) 轮 ——", txt)]
+        last_round = max(seen) if seen else 0
 
         mark = "# 📝 会议纪要（阿鱼整理）"
         if mark in txt:
             rec = txt.split(mark, 1)[1].strip()
             if rec:
                 return (f"【上一次（{when}）的会议纪要 · 阿鱼整理】\n{rec}"[:RECAP_MAX],
-                        f"{when} 那场的会议纪要")
+                        f"{when} 那场的会议纪要", last_round)
 
         notes = [(n, t.strip()) for n, t in
                  re.findall(r"📝 第 (\d+) 轮纪要（写入公用历史框）：\n(.*?)(?=\n- \*\*|\Z)", txt, re.S)
@@ -656,8 +662,8 @@ def build_recap(topic: str, exclude=None):
         if notes:
             body = (f"【上一次（{when}）的逐轮要点】\n" +
                     "\n\n".join(f"### 第 {n} 轮\n{t}" for n, t in notes))
-            return body[:RECAP_MAX], f"{when} 那场的逐轮要点（{len(notes)} 轮）"
-    return "", ""
+            return body[:RECAP_MAX], f"{when} 那场的逐轮要点（{len(notes)} 轮）", last_round
+    return "", "", 0
 
 
 # ── ⭐ 往期讨论（阿包 2026-10-11 下午要的）──────────────────────────
@@ -1032,6 +1038,10 @@ class RealTable:
         self.round_turns = []            # ⭐ 本轮已发言（原文，按顺序 —— 保证"听全了同桌"）
         self.by_guest = {}               # ⭐ 每人历次发言（防原地打转，允许深化）
         self.over_budget = False
+        # ⭐ 「继续讨论」的轮号衔接：上次聊到第 N 轮，本场就从第 N+1 轮接着数
+        #    （对外显示的轮号 = 累计轮号；而战绩表里记的仍是**本场**轮数，不然会重复累加）
+        self.round_offset = max(0, int(settings.get("resume_from") or 0))
+        self.end_round = self.round_offset + max(1, int(settings.get("rounds") or 1))
         # ⭐ 被"请下场"的嘉宾：who -> 连续失败次数（阿包 10-11 那场：Gemini 从第 3 轮起
         #    每轮都撞 429，三次退避全落在同一个限流窗口里 → 每轮白等 70 秒，一直等到散场）
         self.sidelined = {}
@@ -1147,7 +1157,8 @@ class RealTable:
             return
         self.notes += f"\n### 第 {r} 轮\n{note.strip()}\n"
         say("system", f"📝 第 {r} 轮纪要（写入公用历史框）：\n{note.strip()}", "system")
-        self._hist_progress(r)         # ⭐ 议题库要显示"讨论到第几轮"
+        # ⭐ 战绩表记的是**本场**轮数（r 是累计轮号，要减掉衔接偏移，否则「已讨论 N 轮」会虚高）
+        self._hist_progress(r - self.round_offset)
 
     def _pause_between_rounds(self, r: int) -> bool:
         """⭐ 一轮讲完：手动模式下停下等阿包点「▶ 开始下一轮」。
@@ -1161,17 +1172,17 @@ class RealTable:
             第二轮没有显示这个按钮而是直接开启了第三轮"。
         """
         s = self.settings
-        if _auto_next or r >= s["rounds"]:      # 自动模式 / 最后一轮：不用停
+        if _auto_next or r >= self.end_round:   # 自动模式 / 最后一轮：不用停
             return True
         why = _wait_next_round(r, self)
         if why == "stop":
             say("system", f"🛑 阿包结束了讨论（第 {r} 轮讲完）—— "
                           f"可以点「整理会议记录」让我汇总", "system")
-            self._hist_progress(r, finished=True)
+            self._hist_progress(r - self.round_offset, finished=True)
             return False
         if why == "budget":
             say("system", "💸 触到预算上限，先散会 —— 想继续就把 budget_cny 调大", "system")
-            self._hist_progress(r, finished=True)
+            self._hist_progress(r - self.round_offset, finished=True)
             return False
         return True
 
@@ -1188,8 +1199,10 @@ class RealTable:
         if recap:
             self.notes = recap + "\n"
             brief = recap[:200].replace("\n", " ")
+            tail = (f"（上次聊到第 {self.round_offset} 轮，本场从第 {self.round_offset + 1} 轮接着数）"
+                    if self.round_offset else "")
             say("system", f"📜 接着上一次聊 —— 已把{s.get('recap_from') or '上一次的记录'}"
-                          f"翻出来放进公用历史框（{len(recap)} 字）。开头是：\n{brief}…", "system")
+                          f"翻出来放进公用历史框（{len(recap)} 字）{tail}。开头是：\n{brief}…", "system")
         self._hist_begin()             # ⭐ 记一笔：议题 / 参与者 / 计划轮数
 
         # ⭐ 第一轮谁先开口（2026-10-11 修）：**命题人优先** —— 他在桌上就让他先讲；
@@ -1226,12 +1239,13 @@ class RealTable:
             except Exception as e:
                 say("system", f"（主持人开场失败：{type(e).__name__}: {str(e)[:80]}）", "system")
 
-        for r in range(1, s["rounds"] + 1):
+        # ⭐ 「继续讨论」时从上次的下一轮开始数（`round_offset`=0 就是普通开场，轮号仍是 1,2,3…）
+        for r in range(self.round_offset + 1, self.end_round + 1):
             # ⭐ 阿包按了「结束议题」：在当前这个人说完之后收尾（不硬中断）
             if _stop_event.is_set():
                 say("system", f"🛑 阿包结束了这场讨论（讲到第 {r - 1} 轮）—— "
                               f"可以点「整理会议记录」让我汇总一下", "system")
-                self._hist_progress(r - 1, finished=True)
+                self._hist_progress(r - 1 - self.round_offset, finished=True)
                 return
             _round_no_global(r)
             self.round_turns = []          # ⭐ 每轮清空：本轮已发言（原文按顺序攒）
@@ -1260,9 +1274,9 @@ class RealTable:
                     return
                 continue
 
-            shift = (r - 1) % len(self.roster)
-            order = self.roster[shift:] + self.roster[:shift]      # 起点轮转
-            if r == 1:      # ⭐ 第一轮把命题人提到最前 —— 跟开场白里点名的那位**对齐**
+            shift = (r - 1) % len(self.roster)     # 起点轮转（按累计轮号接着往下轮）
+            order = self.roster[shift:] + self.roster[:shift]
+            if r == self.round_offset + 1:  # ⭐ 本场第一轮把命题人提到最前 —— 跟开场白点名的那位**对齐**
                 order = [first] + [g for g in order if g["who"] != first["who"]]
             for g in order:
                 # ⭐ 已经被"请下场"的，本场不再请他 —— 否则每轮都要白等三次退避
@@ -1275,11 +1289,11 @@ class RealTable:
                         self._write_notes(r)
                     say("system", f"🛑 阿包结束了讨论（第 {r} 轮讲到一半）—— "
                                   f"可以点「整理会议记录」让我汇总", "system")
-                    self._hist_progress(r - 1, finished=True)
+                    self._hist_progress(r - 1 - self.round_offset, finished=True)
                     return
                 if self.over_budget:
                     say("system", "💸 触到预算上限，先散会 —— 想继续就把 budget_cny 调大", "system")
-                    self._hist_progress(r - 1, finished=True)
+                    self._hist_progress(r - 1 - self.round_offset, finished=True)
                     return
                 time.sleep(random.uniform(*s["gap"]))
                 try:
@@ -1493,7 +1507,26 @@ def start_requested(resume: bool = False) -> None:
     global _start_settings, _log_path, _last_log_path
     _start_settings = load_settings()
     want = _start_settings["topic"]
-    if _log_path is None or want[:18] not in str(_log_path.name):
+
+    # ⭐ 要不要开新日志文件？（2026-10-11 晚重写）
+    #    旧写法是 `want[:18] not in str(_log_path.name)` —— 拿**议题原文**去比**文件名**，
+    #    可文件名里的空格早被 init_log() 换成 `-` 了 → 含空格的议题永远比不中、每次都新建，
+    #    不含空格的议题（比如"善待AI，是否会…"）又会一直复用**上一场那个已经有内容的文件**，
+    #    结果"继续讨论"时把要翻的记录本身排除掉了（阿包当晚撞上的就是这个）。
+    #    现在：按 `log_safe_topic()` 规范名比较；而且**只有"点了开场没跑起来"的空壳才复用**，
+    #    已经聊过的文件一律新建 —— 否则两场的记录会混进同一个文件。
+    safe = log_safe_topic(want)
+    reuse = False
+    if _log_path is not None and Path(_log_path).exists():
+        m = re.match(r"^\d{8}-\d{6}-(.+)$", Path(_log_path).stem)
+        if m and re.sub(r"-\d+$", "", m.group(1)) == safe:
+            try:
+                old = Path(_log_path).read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                old = ""
+            reuse = ("—— 第 " not in old) and ("会议纪要（阿鱼整理）" not in old)
+    fresh = not reuse
+    if fresh:
         init_log(want)
     _last_log_path = _log_path       # ⭐ 记下来：阿包点「整理会议记录」时读它
 
@@ -1501,12 +1534,16 @@ def start_requested(resume: bool = False) -> None:
     #    而不是写进上一场（那会把上一场的记录尾巴弄脏）
     _start_settings.pop("recap", None)
     _start_settings.pop("recap_from", None)
+    _start_settings.pop("resume_from", None)
     if resume:
-        # ⚠️ exclude=_log_path 不能省：本场日志刚刚才建出来，时间戳最新，
-        #    不排除掉的话"上一次"翻到的是它自己（空的）
-        recap, src = build_recap(want, exclude=_log_path)
+        # ⚠️ 只有**刚刚新建**的那个空日志才要排除 —— 它的时间戳最新，不排除会翻到它自己。
+        #    **同一议题重开时不会新建文件**，那时 `_log_path` 就是"上一次那场"（有内容），
+        #    再排除它等于把要翻的记录本身扔掉 —— 阿包 10-11 晚就是这么撞上的：
+        #    聊完两轮想接着从第三轮开，界面上却提示"没翻到上一次的记录"。
+        recap, src, last_round = build_recap(want, exclude=_log_path if fresh else None)
         if recap:
             _start_settings["recap"], _start_settings["recap_from"] = recap, src
+            _start_settings["resume_from"] = last_round        # ⭐ 本场轮号接着上次往下数
         else:
             say("system", "📜 想接着上次聊，但没翻到上一次的记录 —— 这一场只能从头来", "system")
 

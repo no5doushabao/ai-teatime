@@ -150,6 +150,7 @@ def load_roster() -> list:
         item = dict(g)
         item["key"] = key
         item["ready"] = bool(key)
+        item["resting"] = is_resting(who)      # ⭐ 界面要显示"谁在休息"
         # ⭐ config 里显式写了 api 的，记进 URL 表 —— llm_call() 照它选协议（见 _api_style）
         if (g.get("api") or "").strip():
             _URL_API[(g.get("base_url") or "").rstrip("/")] = _api_style(
@@ -215,6 +216,61 @@ def think_budget_for(who: str, default):
 
 
 load_think_budget()                      # 启动就读一次
+
+
+# ── ⭐ 让某位嘉宾「休息」：这一场她不参与（阿包 2026-10-12 凌晨要的）──────
+#    原话：「在设定每轮的思考量那里，假如某个 ai 我先让她休息的话，增加一个按钮，
+#            点了这次讨论她就不参与」。
+#    ⚠️ 休息 ≠ 掉线：key 还在、随时能叫回来，只是**不上场**（不发言、也不算进"在场几位"）。
+#       和"没配 key"的区别只是——一个是被请去休息，一个是压根没来。
+#    状态存 resting.json（运行时数据，不进 git），点了就一直是休息，再点一下请回来。
+_resting = {}
+
+
+def _rest_path() -> Path:
+    return ROOT / "resting.json"
+
+
+def load_resting() -> dict:
+    """读 `resting.json`（谁在休息）。不存在 / 内容坏了都当「没人休息」，绝不抛。"""
+    global _resting
+    _resting = {}
+    try:
+        d = json.loads(_rest_path().read_text(encoding="utf-8"))
+        if isinstance(d, dict):
+            _resting = {str(k): True for k, v in d.items() if v}
+    except Exception:
+        pass
+    return _resting
+
+
+def save_resting() -> bool:
+    try:
+        _rest_path().write_text(json.dumps(_resting, ensure_ascii=False, indent=2),
+                                encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def set_resting(who: str, rest: bool) -> bool:
+    """让她休息 / 请她回来。"""
+    if not who:
+        return False
+    if rest:
+        _resting[who] = True
+    else:
+        _resting.pop(who, None)
+    return save_resting()
+
+
+def is_resting(who: str) -> bool:
+    """⭐ 各处都**实时**问这个函数，而不是看 roster 快照里的字段 ——
+    休息开关随时可能被改，而 roster 是服务启动时读的（`idle_loop` 待机时尤其明显）。"""
+    return bool(_resting.get(who))
+
+
+load_resting()                           # 启动就读一次
 
 
 _chosen_topic_index = 0          # ⭐ 阿包在界面上选的议题（0 = 第一个）
@@ -1160,7 +1216,10 @@ class RealTable:
     """
 
     def __init__(self, roster: list, settings: dict):
-        self.roster = [g for g in roster if g.get("ready")]
+        # ⭐ 「让她休息」的这场不参与（阿包 2026-10-12 要的）——
+        #    和"没 key"一样不上场；`is_resting()` 是实时的，不看 roster 快照
+        self.roster = [g for g in roster
+                       if g.get("ready") and not is_resting(g["who"])]
         self.settings = settings
         self.spent_tokens = 0
         self.notes = ""                  # ⭐ 公用历史框（由记录员每轮追加）
@@ -1730,14 +1789,21 @@ def idle_loop(roster: list, settings: dict) -> None:
     ⭐ 阿包 2026-10-09 的原话：「把自动回复先关了吧，要不然阿鱼一个人在里面其实挺寂寞的」——
        所以人没齐时**绝不自动发散**；但阿包一开口，在场的必须接话（否则他说话没人理，更寂寞）。
     """
-    ready = [g for g in roster if g.get("ready")]
+    def live_ready() -> list:
+        """⭐ 实时算「现在在场的人」：没 key 的不算，**被请去休息的也不算**。
+
+        不能只在进循环时算一次 —— 休息开关是他随时在界面上点的（待机时尤其明显）。
+        """
+        return [g for g in roster if g.get("ready") and not is_resting(g["who"])]
+
+    ready = live_ready()
     names = "、".join(g["name"] for g in ready) or "（空场）"
     say("system", f"🍵 讨论会待机中 · 在场：{names}　就绪 {len(ready)}/{settings['min_guests']} 位", "system")
     say("system", f"本次议题：{settings['topic']}", "system")
     say("system", "点上方「🍵 开场 / 换议题」挑一个就能开始；也可以直接说话，在场的会回你", "system")
 
     while True:
-        if _start_event.is_set() and len(ready) >= settings["min_guests"]:
+        if _start_event.is_set() and len(live_ready()) >= settings["min_guests"]:
             fresh = _start_settings or settings      # ⭐ 用按下开场那一刻的配置（议题可能是刚选的）
             say("system", f"阿包按了开场键 —— 议题：{fresh['topic']}", "system")
             RealTable(roster, fresh).run()
@@ -1750,7 +1816,7 @@ def idle_loop(roster: list, settings: dict) -> None:
             continue
         q = pending[-1]
         say("system", f"（回应阿包：「{q[:24]}」）", "system")
-        for g in ready:
+        for g in live_ready():          # ⭐ 用最新的在场名单（休息的那位就不接话了）
             try:
                 t = llm_call(g["base_url"], g["model"], g["key"], [
                     {"role": "system", "content": (g.get("persona") or "") +
@@ -1917,7 +1983,9 @@ class Handler(SimpleHTTPRequestHandler):
             roster = load_roster()
             body = json.dumps({"guests": [
                 {"who": g["who"], "name": g.get("name", g["who"]),
-                 "org": g.get("org", ""), "ready": bool(g.get("ready"))}
+                 "org": g.get("org", ""), "ready": bool(g.get("ready")),
+                 # ⭐ resting：界面靠它画灰头像 + 😴 角标、「休息中 N 位」
+                 "resting": bool(g.get("resting"))}
                 for g in roster]}, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -2146,6 +2214,30 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             body = json.dumps({"ok": ok}, ensure_ascii=False).encode("utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/rest":                   # ⭐ 参会者一览：让某位休息 / 请她回来
+            n = int(self.headers.get("Content-Length", 0))
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                payload = {}
+            who = str(payload.get("who") or "")
+            rest = bool(payload.get("rest"))
+            ok = set_resting(who, rest)
+            name = next((g["name"] for g in load_roster() if g["who"] == who), who)
+            if ok:
+                # ⚠️ 正在跑的那场用的是开场时的名单快照 —— 改动**下一场**才生效，
+                #    所以要说清楚，别让他以为点了没反应（这个坑今晚刚踩过一次）
+                tail = "（这一场还在跑，下一场生效）" if _debating else ""
+                say("system", (f"😴 {name} 去休息了 —— 这场她不参与{tail}" if rest
+                               else f"☕ {name} 回来了 —— 下一场照常参与{tail}"), "system")
+            body = json.dumps({"ok": ok, "resting": _resting},
+                              ensure_ascii=False).encode("utf-8")
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

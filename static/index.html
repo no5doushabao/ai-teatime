@@ -209,6 +209,19 @@
     margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .rcard i { display: block; font-size: 10px; font-style: normal; color: #7c7c93; margin-top: 1px; }
+  /* ⭐ 「让她休息」：卡片变灰 + 右上角一个 😴 角标（阿包 2026-10-12 凌晨要的）*/
+  .rcard { position: relative; }
+  .rcard .rsleep {
+    display: none; position: absolute; right: 2px; top: 0; font-size: 15px;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,.6));
+  }
+  .rcard.resting .rsleep { display: block; }
+  .rcard.resting img { filter: grayscale(1); opacity: .38; }
+  .rcard.resting b { color: #7c7c93; }
+  .rrestrow { margin-top: 12px; }
+  .rrestrow .rhint2 { font-size: 11.5px; color: #83839a; }
+  #rRest { padding: 5px 12px; font-size: 12.5px; border-radius: 9px; }
+  #rRest.on { background: #4a3a2a; border-color: #8a6a44; color: #ffe4c2; }
   .rpanel { padding: 12px 20px 4px; border-top: 1px solid #2f2f3a; }
   .rrow { display: flex; align-items: center; gap: 12px; }
   .rrow .rtag { font-size: 11.5px; color: #83839a; white-space: nowrap; }
@@ -494,6 +507,12 @@
       </div>
       <label class="rchk"><input type="checkbox" id="rUnlimited"> 不限制</label>
       <div class="rwarn hidden" id="rWarn">⚠️ 注意！勾选了不限制，该AI可能会吃光你的TOKEN！！</div>
+      <!-- ⭐ 让她休息：这一场不参与（key 还在，随时能叫回来）—— 阿包 2026-10-12 凌晨要的 -->
+      <div class="rrow rrestrow">
+        <span class="rtag">参与状态</span>
+        <button class="ghost" id="rRest">😴 让她休息（这场不参与）</button>
+        <span class="rhint2" id="rRestHint"></span>
+      </div>
     </div>
     <div class="mfoot">
       <span class="hint" id="rHint">点头像 → 拖滑块，调这位 AI 的思考用量</span>
@@ -1224,6 +1243,9 @@ const rHint = document.getElementById("rHint");
 let rPicked = null;        // 当前选中的是谁
 let rBudgets = {};         // who -> tokens（0 = 不限制；没有这条 = 跟随 config 默认）
 let rDefault = 1200;
+let rResting = {};         // who -> true（⭐ 谁在休息：这一场不参与，随时能叫回来）
+const rRest = document.getElementById("rRest");
+const rRestHint = document.getElementById("rRestHint");
 
 function rSave(who, tokens) {
   return fetch("/think_budget", {
@@ -1246,6 +1268,20 @@ function rPaint() {                       // 把当前设置画到控件上
     rVal.textContent = (v === undefined ? n + "（默认）" : String(n));
   }
   rWarn.classList.toggle("hidden", !unlimited);
+  rPaintRest();
+}
+
+/* ⭐ 「休息」按钮的画法：状态跟着 rResting 走（阿包 2026-10-12 凌晨要的）*/
+function rPaintRest() {
+  const on = !!rResting[rPicked];
+  rRest.textContent = on ? "☕ 请她回来（恢复参与）" : "😴 让她休息（这场不参与）";
+  rRest.classList.toggle("on", on);
+  rRestHint.textContent = on ? "休息中：不发言，也不算进「在场几位」" : "";
+}
+
+/* 卡片上的 😴 角标 / 灰头像 */
+function rPaintCardMarks() {
+  [...rGrid.children].forEach(c => c.classList.toggle("resting", !!rResting[c.dataset.who]));
 }
 
 function rSelect(who) {
@@ -1265,20 +1301,26 @@ async function openRoster() {
     ]);
     const ready = (ro.guests || []).filter(g => g.ready);   // ⭐ 只列**已连接**的
     rBudgets = tb.budgets || {};
+    rResting = {};                                          // ⭐ 休息状态跟着 /roster 走
+    (ro.guests || []).forEach(g => { if (g.resting) rResting[g.who] = true; });
     rDefault = tb.default || 1200;
     if (tb.min) rRange.min = tb.min;
     if (tb.max) rRange.max = tb.max;
     rGrid.innerHTML = "";
     ready.forEach(g => {
       const d = document.createElement("div");
-      d.className = "rcard";
+      d.className = "rcard" + (rResting[g.who] ? " resting" : "");
       d.dataset.who = g.who;
       d.innerHTML = `<img src="/avatars/${esc(g.who)}.png" alt="${esc(g.name)}">` +
+                    `<span class="rsleep" title="休息中：这场不参与">😴</span>` +
                     `<b>${esc(g.name)}</b><i>${esc(g.org || "")}</i>`;
       d.onclick = () => rSelect(g.who);
       rGrid.appendChild(d);
     });
-    rSub.textContent = `已连接 ${ready.length} 位 · 点头像就能调它的思考用量`;
+    const nRest = ready.filter(g => rResting[g.who]).length;
+    rSub.textContent = `已连接 ${ready.length} 位` +
+      (nRest ? ` · 😴 休息中 ${nRest} 位（这场上场 ${ready.length - nRest} 位）` : "") +
+      ` · 点头像就能调它的思考用量`;
     rHint.textContent = "⚠️ 思考用量 = 它的「思考 + 发言」总预算（推理模型这两者共用一份）";
     if (ready.length) {
       rSelect(ready[0].who);
@@ -1310,6 +1352,33 @@ rUnlimited.addEventListener("change", async () => {
 });
 document.getElementById("rosterBtn").onclick = openRoster;
 document.getElementById("rClose").onclick = () => rosterModal.classList.add("hidden");
+
+/* ⭐ 「让她休息 / 请她回来」：这一场不参与 —— key、思考用量、还有她本人的记忆全都留着，
+   只是不上场。再点一下就能叫回来（阿包 2026-10-12 凌晨要的）*/
+rRest.onclick = async () => {
+  if (!rPicked) return;
+  const want = !rResting[rPicked];              // 点一下就切换
+  rRest.disabled = true;
+  try {
+    const r = await fetch("/rest", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ who: rPicked, rest: want })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (j.ok) {
+      rResting = j.resting || {};
+      rPaintRest();
+      rPaintCardMarks();
+      rSub.textContent = want
+        ? "已请她休息 —— 这场不参与（随时可以叫回来）"
+        : "已请她回来 —— 下一场照常参与";
+    } else {
+      rSub.textContent = "⚠️ 改不动 —— 服务还在跑吗？";
+    }
+  } finally {
+    rRest.disabled = false;
+  }
+};
 
 /* ⭐ 打开窗口就弹议题选择（阿包 2026-10-10 的要求） */
 loadTopics();

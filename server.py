@@ -957,7 +957,11 @@ def broadcast(msg: dict) -> None:
             return
         with _log_path.open("a", encoding="utf-8") as f:
             who = msg.get("name") or msg.get("who")
-            f.write(f"- **{msg.get('ts','')} {who}**：{msg.get('text','')}\n")
+            # ⭐ 带图的消息，日志里也留一行图片链接 —— 日志是 .md，回看时能直接显示；
+            #    不留的话，过几天再看记录就不知道当时发的什么图了（2026-10-12）
+            img = msg.get("image") or ""
+            tag = f"\n  ![阿包发的图]({img})\n" if img else ""
+            f.write(f"- **{msg.get('ts','')} {who}**：{msg.get('text','')}{tag}\n")
     except Exception:
         pass
 

@@ -291,6 +291,8 @@ def parse_topics() -> list:
     for t in out:
         t["body"] = strip_tail_seps(t["body"].strip())      # ⭐ 剥掉尾巴上的 `---`（见上方说明）
         t["author"] = parse_author(t["body"])
+        t["edited"] = parse_edited(t["body"])               # ⭐ 被人工改过的话，正文里有留痕
+        t["reason"] = strip_meta_lines(t["body"])           # ⭐ 纯理由 —— 「✏️ 编辑」弹窗预填用
     return out
 
 
@@ -310,6 +312,36 @@ def parse_author(body: str) -> str:
             if who:
                 return who
     return ""
+
+
+def parse_edited(body: str) -> str:
+    """⭐ 认出「这条议题被人工改过」的留痕行，返回修改时间（没改过就返回空串）。
+
+    留痕格式（`edit_topic()` 生成）：`> ✏️ 已修改：2026-10-11 19:50`
+    界面靠它给这条议题标「（已修改）」。
+    """
+    m = re.search(r"^>[^\n]{0,4}已修改\s*[:：]\s*([^\n]*)$", body or "", re.M)
+    return m.group(1).strip() if m else ""
+
+
+def strip_meta_lines(body: str) -> str:
+    """⭐ 把正文里的"元信息行"剥掉，只留阿包写的理由（「✏️ 编辑」弹窗预填的就是它）。
+
+    元信息行 = 程序自己生成的那两种，不是他写的正文：
+      · `> **由谁提供**：GPT`、`> ✏️ 已修改：<时间>`
+      · `（由克劳德提出）` 这种独立成行的旧写法（`parse_author` 也认它）
+    ⚠️ 只剥这两种固定格式 —— 正文里其它的引用行、括号内容一律留着。
+       （不剥的话：编辑一次，理由框里就多一份元信息，保存后又叠一层。）
+    """
+    keep = []
+    for line in (body or "").splitlines():
+        s = line.strip()
+        if s.startswith(">") and ("由谁提供" in s or "已修改" in s):
+            continue
+        if re.fullmatch(r"[（(]\s*由\s*[^）)]{1,24}?\s*(?:提出|提供)\s*[）)]", s):
+            continue
+        keep.append(line)
+    return strip_tail_seps("\n".join(keep).strip())
 
 
 def add_topic(title: str, reason: str, author: str) -> bool:
@@ -384,6 +416,59 @@ def delete_topic(index: int) -> bool:
     if not items or not (0 <= int(index) < len(items)):
         return False
     return write_topics([t for i, t in enumerate(items) if i != int(index)])
+
+
+def edit_topic(index, title: str, reason: str, author: str):
+    """⭐ 编辑一条议题（议题整理里的「✏️ 编辑」按钮）。
+
+    三个字段都能改：题目 / 理由正文 / 由谁提供。
+    改过的议题会在正文里留一行 `> ✏️ 已修改：<时间>` —— 界面据此标「（已修改）」，
+    也让"这条被动过"在 `topics.md` 里看得见（阿包 2026-10-11 晚要的）。
+
+    ⚠️ 改了题目的话，把 `debate-history.json` 里的旧题目一并改过来 ——
+       战绩是按题目名匹配的，不改的话「已讨论 N 个轮次 / 参与者」当场断链。
+
+    返回 `(ok, 说明)`：说明文字留着给界面显示失败原因 / 迁移了几场。
+    """
+    items = parse_topics()
+    try:
+        i = int(index)
+    except (TypeError, ValueError):
+        return False, "议题下标不对"
+    if not (0 <= i < len(items)):
+        return False, "找不到这个议题（列表可能刚变过，重开一下）"
+    new_title = (title or "").strip()
+    if not new_title:
+        return False, "议题题目不能空着"
+    if any(j != i and t["title"].strip() == new_title for j, t in enumerate(items)):
+        return False, "已经有同名的议题了"
+
+    old_title = items[i]["title"]
+    parts = []
+    if (author or "").strip():
+        parts.append(f"> **由谁提供**：{author.strip()}")
+    parts.append(f"> ✏️ 已修改：{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    if (reason or "").strip():
+        parts.append(reason.strip())
+    items[i] = {"title": new_title, "body": "\n\n".join(parts)}   # ⭐ 整条重建，元信息不会叠层
+    if not write_topics(items):
+        return False, "写回 topics.md 失败"
+
+    moved = rename_history_topic(old_title, new_title) if old_title != new_title else 0
+    return True, (f"（题目也改了：「{old_title}」的 {moved} 场战绩已跟着改过来）" if moved else "")
+
+
+def rename_history_topic(old: str, new: str) -> int:
+    """⭐ 议题改了题目：把往期战绩里的旧题目一起改过来（否则战绩断链）。返回改了几场。"""
+    h = load_history()
+    n = 0
+    for d in h.get("debates", []):
+        if (d.get("topic") or "").strip() == (old or "").strip():
+            d["topic"] = new
+            n += 1
+    if n:
+        save_history(h)
+    return n
 
 
 def reset_topic(title: str) -> int:
@@ -1486,8 +1571,11 @@ class Handler(SimpleHTTPRequestHandler):
             md = parse_topics()
             body = json.dumps({
                 # ⭐ body 也带上：议题框里点中某条，要就地展开"为什么选它"给阿包查阅
+                # ⭐ edited = 被人工改过（有留痕）→ 界面上标「（已修改）」
+                # ⭐ reason = 剥掉元信息行的纯理由 → 「✏️ 编辑」弹窗预填
                 "topics": [{"index": i, "title": t["title"],
-                            "author": t.get("author", ""), "body": t.get("body", "")}
+                            "author": t.get("author", ""), "body": t.get("body", ""),
+                            "edited": t.get("edited", ""), "reason": t.get("reason", "")}
                            for i, t in enumerate(md)],
                 "current": s["topic_index"],
                 "ready": ready_n,
@@ -1592,6 +1680,25 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception:
                 ok = False
             body = json.dumps({"ok": ok}, ensure_ascii=False).encode("utf-8")
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/topics/edit":            # ⭐ 议题一览：编辑议题（题目 / 理由 / 由谁提供）
+            n = int(self.headers.get("Content-Length", 0))
+            ok, tip = False, ""
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+                ok, tip = edit_topic(payload.get("index"), payload.get("title") or "",
+                                     payload.get("reason") or "", payload.get("author") or "")
+                if ok:
+                    say("system", f"✏️ 议题已修改（正文里标了「已修改」）："
+                                  f"{str(payload.get('title') or '')[:40]}{tip}", "system")
+            except Exception as e:
+                ok, tip = False, f"编辑失败：{type(e).__name__}"
+            body = json.dumps({"ok": ok, "msg": tip}, ensure_ascii=False).encode("utf-8")
             self.send_response(200 if ok else 400)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))

@@ -288,6 +288,9 @@
   .ibtn:hover { background: #3a3a46; }
   .ibtn.del:hover { background: #5c2f2f; border-color: #8a4444; color: #ffd9d9; }
   .ibtn.rst:hover { background: #2f4a3a; border-color: #447a55; color: #d9ffe4; }
+  /* ⭐ 「（已修改）」标记：这条议题被人工改过（阿包 2026-10-11 晚要的「编辑」）*/
+  .edtag { color: #e6b566; font-size: 12px; font-weight: 600; margin-left: 5px; white-space: nowrap; }
+  .ibtn.edt:hover { background: #33456a; border-color: #4a6fa5; color: #dbe9ff; }
   /* ⭐ 增加议题弹窗 */
   .abody { padding: 4px 20px 8px; overflow-y: auto; }
   .abody label { display: block; font-size: 12.5px; color: #9aa9c0; margin: 12px 0 5px; }
@@ -394,8 +397,8 @@
 <div id="addModal" class="modal top hidden">
   <div class="mbox" style="max-width:600px">
     <div class="mhead">
-      <div class="mtitle">➕ 增加议题</div>
-      <div class="msub">加完会出现在议题整理的末尾，顺序可以拖动调整</div>
+      <div class="mtitle" id="addHead">➕ 增加议题</div>
+      <div class="msub" id="addSub">加完会出现在议题整理的末尾，顺序可以拖动调整</div>
     </div>
     <div class="abody">
       <label for="addTitle">议题题目</label>
@@ -592,7 +595,8 @@ function loadTopics() {
       const el = document.createElement("div");
       el.className = "titem" + (t.index === d.current ? " sel" : "");
       el.dataset.index = t.index;
-      el.innerHTML = `<div class="ti">${t.index + 1}</div><div><div class="tt">${esc(t.title)}</div>` +
+      el.innerHTML = `<div class="ti">${t.index + 1}</div><div><div class="tt">${esc(t.title)}` +
+                     `${t.edited ? '<span class="edtag" title="这条议题被改过">（已修改）</span>' : ""}</div>` +
                      `<div class="tb">${bits.join(" · ")}</div>` +
                      (t.body ? `<div class="tfull">${esc(t.body)}</div>` : "") + `</div>`;
       el.onclick = () => {
@@ -600,7 +604,9 @@ function loadTopics() {
         el.classList.add("sel");
         pickedTopic = t.index;
         mStart.disabled = !canStart;
-        if (canStart) document.getElementById("topicText").textContent = t.title;
+        // ⭐ 改过的议题：顶栏也跟着标「（已修改）」，免得他以为还在聊旧版
+        if (canStart) document.getElementById("topicText").textContent =
+          t.title + (t.edited ? "（已修改）" : "");
       };
       topicList.appendChild(el);
       if (pickedTopic === null) pickedTopic = d.current;
@@ -688,10 +694,13 @@ function showLib() {
       // ⭐ 由谁提供（阿包要的，显示在战绩前面）
       const by = tp.author ? `由 <span class="who">${esc(tp.author)}</span> 提供 · ` : `<span class="todo">（未标注提出者）</span> · `;
       meta = by + meta;
+      const edtag = tp.edited
+        ? `<span class="edtag" title="这条议题被改过（最后改于 ${esc(tp.edited)}）">（已修改）</span>` : "";
       el.innerHTML =
         `<div class="hrow"><div class="hd"><span class="grip">⠿</span><span class="num">${tp.index + 1}.</span>` +
-        `<span class="ht">${esc(tp.title)}</span></div>` +
+        `<span class="ht">${esc(tp.title)}${edtag}</span></div>` +
         `<div class="hbtns">` +
+        `<button class="ibtn edt" title="改题目 / 理由 / 由谁提供">✏️ 编辑</button>` +
         `<button class="ibtn rst" title="清空这个议题的讨论战绩（议题保留）">♻️ 重置</button>` +
         `<button class="ibtn del" title="从议题库删掉这个议题">🗑 删除</button>` +
         `</div></div><div class="hm">${meta}</div>`;
@@ -726,6 +735,12 @@ function showLib() {
             showLib();
           });
       };
+      // ⭐ 「✏️ 编辑」：改题目 / 理由 / 由谁提供（复用增加议题那个弹窗）—— 阿包 2026-10-11 晚要的
+      const ed = el.querySelector(".edt");
+      if (ed) ed.onclick = e => {
+        e.stopPropagation();
+        showEdit(tp);
+      };
       attachDnD(el);
       libList.appendChild(el);
     });
@@ -752,9 +767,32 @@ document.getElementById("cfYes").onclick = async () => {
   if (act) await act();
 };
 
-/* ⭐ 增加议题弹窗 */
+/* ⭐ 增加 / 编辑议题 —— 共用同一个弹窗。
+   阿包 2026-10-11 晚的原话：「增加一个编辑的按钮，让用户可以修改议题的内容。
+   但是如果修改过，则需要注明（已修改）」 */
 const addModal = document.getElementById("addModal");
+let addMode = "add";        // "add" = 增加 · "edit" = 编辑
+let editIndex = null;       // 编辑模式下：改的是哪一条
+
+function setAddMode(mode) {
+  addMode = mode;
+  const editing = mode === "edit";
+  document.getElementById("addHead").textContent = editing ? "✏️ 编辑议题" : "➕ 增加议题";
+  document.getElementById("addSub").textContent = editing
+    ? "改完写回 topics.md —— 这条会标上「（已修改）」"
+    : "加完会出现在议题整理的末尾，顺序可以拖动调整";
+  document.getElementById("addSave").textContent = editing ? "保存修改" : "保存";
+  // ⭐ 编辑已有议题时不必再"现场提问"（那是给新议题找灵感用的）
+  document.getElementById("liveAsk").style.display = editing ? "none" : "";
+  if (editing) {
+    document.getElementById("laPanel").classList.add("hidden");
+    document.getElementById("laAnswer").classList.add("hidden");
+  }
+}
+
 function showAdd() {
+  setAddMode("add");
+  editIndex = null;
   document.getElementById("addTitle").value = "";
   document.getElementById("addReason").value = "";
   document.getElementById("addAuthor").value = "";
@@ -762,6 +800,21 @@ function showAdd() {
   addModal.classList.remove("hidden");
   setTimeout(() => document.getElementById("addTitle").focus(), 50);
 }
+
+/* ⭐ 编辑：把这条议题现有的三个字段填好再弹出来。
+   tp.reason 是服务端剥掉元信息行之后的**纯理由** ——
+   直接拿 body 预填的话，编辑一次就多叠一层"由谁提供 / 已修改"。 */
+function showEdit(tp) {
+  setAddMode("edit");
+  editIndex = tp.index;
+  document.getElementById("addTitle").value = tp.title || "";
+  document.getElementById("addReason").value = tp.reason || "";
+  document.getElementById("addAuthor").value = tp.author || "";
+  document.getElementById("addErr").textContent = "";
+  addModal.classList.remove("hidden");
+  setTimeout(() => document.getElementById("addTitle").focus(), 50);
+}
+
 async function saveAdd() {
   const title = document.getElementById("addTitle").value.trim();
   const reason = document.getElementById("addReason").value.trim();
@@ -769,16 +822,19 @@ async function saveAdd() {
   const err = document.getElementById("addErr");
   if (!title) { err.textContent = "⚠️ 议题题目不能空着"; return; }
   err.textContent = "";
-  const r = await fetch("/topics/add", {
+  const editing = addMode === "edit";
+  const r = await fetch(editing ? "/topics/edit" : "/topics/add", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, reason, author })
+    body: JSON.stringify(editing ? { index: editIndex, title, reason, author }
+                                 : { title, reason, author })
   });
-  const j = await r.json();
+  const j = await r.json().catch(() => ({}));
   if (j.ok) {
     addModal.classList.add("hidden");
-    showLib();                      // ⭐ 回到议题整理，能看到新加的那条
+    showLib();                      // ⭐ 回到议题整理，能看到新加 / 刚改完的那条
   } else {
-    err.textContent = "⚠️ 保存失败（题目重复了？换个说法试试）";
+    err.textContent = "⚠️ " + (j.msg ||
+      (editing ? "保存失败" : "保存失败（题目重复了？换个说法试试）"));
   }
 }
 document.getElementById("addCancel").onclick = () => addModal.classList.add("hidden");

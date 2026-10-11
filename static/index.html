@@ -563,6 +563,16 @@ const topicList = document.getElementById("topicList");
 const mSub = document.getElementById("mSub");
 const mHint = document.getElementById("mHint");
 const mStart = document.getElementById("mStart");
+let topicDebates = {};      // ⭐ 议题下标 → 讨论过几场（「继续讨论」按钮判定用）
+
+/* ⭐ 选中的是聊过的议题 → 底部按钮写「继续讨论」；没聊过的（新议题）→ 「开始讨论」。
+   阿包 2026-10-11 晚要的：「在换议题里面，如果用户选择的是已经讨论过的话题，
+   则下面【开始讨论】那个位置就是继续讨论。如果是新议题就保持不动」 */
+function paintStartBtn() {
+  const n = topicDebates[pickedTopic] || 0;
+  mStart.textContent = n ? "继续讨论" : "开始讨论";
+  mStart.title = n ? `这条已经讨论过 ${n} 场 —— 接着聊` : "";
+}
 
 function showModal() { modal.classList.remove("hidden"); }
 function hideModal() { modal.classList.add("hidden"); }
@@ -576,6 +586,12 @@ function loadTopics() {
     fetch("/history").then(r => r.json()).catch(() => ({ debates: [] }))
   ]).then(([d, h]) => {
     const debates = (h && h.debates) || [];
+    // ⭐ 每条议题"聊过几场" —— 「继续讨论」按钮判定用。
+    //    这里按**全部**议题算（不只是列出来的前 5 条），因为默认选中项可能是第 6 条以后。
+    topicDebates = {};
+    d.topics.forEach(t => {
+      topicDebates[t.index] = debates.filter(x => (x.topic || "").trim() === t.title.trim()).length;
+    });
     topicList.innerHTML = "";
     const n = d.topics.length;
     const shown = d.topics.slice(0, TOPIC_SHOW_MAX);
@@ -607,6 +623,7 @@ function loadTopics() {
         // ⭐ 改过的议题：顶栏也跟着标「（已修改）」，免得他以为还在聊旧版
         if (canStart) document.getElementById("topicText").textContent =
           t.title + (t.edited ? "（已修改）" : "");
+        paintStartBtn();             // ⭐ 聊过的 → 「继续讨论」，新议题 → 「开始讨论」
       };
       topicList.appendChild(el);
       if (pickedTopic === null) pickedTopic = d.current;
@@ -618,6 +635,7 @@ function loadTopics() {
       ? `上面是前 ${TOPIC_SHOW_MAX} 个（共 ${n} 个）—— 想讨论别的、想加减或排序，点「📋 议题整理」`
       : `想加新议题、或调整顺序？点「📋 议题整理」`;
     topicList.appendChild(more);
+    paintStartBtn();               // ⭐ 开屏默认选中那条也要标对（聊过 → 「继续讨论」）
     showModal();
   }).catch(() => { mSub.textContent = "读不到议题（服务没起来？）"; showModal(); });
 }

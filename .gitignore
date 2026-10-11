@@ -10,6 +10,8 @@ topics.md
 
 # 运行时产物（每场讨论一个日志文件，会一直涨，不入库）
 logs/
+# ⭐ 阿包发的图（2026-10-12）：运行时数据，不入库
+shots/
 chat-log.md
 debate-history.json
 __pycache__/

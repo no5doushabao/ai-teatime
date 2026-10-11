@@ -24,7 +24,10 @@
     POST /say              {"text": "..."} 阿包插话
 """
 import argparse
+import base64
+import hashlib
 import json
+import mimetypes
 import os
 import queue
 import random
@@ -151,6 +154,7 @@ def load_roster() -> list:
         item["key"] = key
         item["ready"] = bool(key)
         item["resting"] = is_resting(who)      # ⭐ 界面要显示"谁在休息"
+        item["vision"] = bool(g.get("vision", True))   # ⭐ 能不能看图（千问显式关掉）
         # ⭐ config 里显式写了 api 的，记进 URL 表 —— llm_call() 照它选协议（见 _api_style）
         if (g.get("api") or "").strip():
             _URL_API[(g.get("base_url") or "").rstrip("/")] = _api_style(
@@ -271,6 +275,76 @@ def is_resting(who: str) -> bool:
 
 
 load_resting()                           # 启动就读一次
+
+
+# ── ⭐ 阿包发的图片（2026-10-12 凌晨加：旁听席可以发图了）──────────────
+#    流程：前端压缩成 JPEG 的 data URL → POST /say → 存成 shots/xxx.jpg →
+#    广播里带 /shots/xxx.jpg（SSE 消息不带 base64，省流量）→ 嘉宾发言时再读回来转 data URL。
+#    ⚠️ 图片**只进带它的那一轮**（后面靠纪要带）—— 每张图 ≈ 1024 token/位，轮轮都带太贵。
+SHOT_MAX_BYTES = 6 * 1024 * 1024         # 单张图（解出来的原始字节）上限
+SHOT_EXTS = {"png": "png", "jpeg": "jpg", "jpg": "jpg", "gif": "gif", "webp": "webp"}
+
+
+def save_shot(data_url: str) -> str:
+    """把一张 data URL 图存进 `shots/`，返回可访问的 `/shots/xxx`；失败返回 ""。"""
+    m = re.match(r"^data:image/(png|jpe?g|gif|webp);base64,([A-Za-z0-9+/=\s]+)$",
+                 (data_url or "").strip(), re.S)
+    if not m:
+        return ""
+    ext = SHOT_EXTS.get(m.group(1).lower(), "jpg")
+    try:
+        raw = base64.b64decode(re.sub(r"\s+", "", m.group(2)), validate=False)
+    except Exception:
+        return ""
+    if not raw or len(raw) > SHOT_MAX_BYTES:
+        return ""
+    d = ROOT / "shots"
+    d.mkdir(exist_ok=True)
+    name = f"{datetime.now():%Y%m%d-%H%M%S}-{hashlib.md5(raw).hexdigest()[:8]}.{ext}"
+    try:
+        (d / name).write_bytes(raw)
+    except Exception:
+        return ""
+    return f"/shots/{name}"
+
+
+def image_data_url(shot_url: str) -> str:
+    """把 `/shots/xxx` 读回来变成 data URL（喂给模型用）。读不到返回 ""。"""
+    if not shot_url or not shot_url.startswith("/shots/"):
+        return ""
+    name = shot_url[len("/shots/"):]
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return ""
+    p = ROOT / "shots" / name
+    if not p.exists() or not p.is_file():
+        return ""
+    try:
+        raw = p.read_bytes()
+    except Exception:
+        return ""
+    mime = mimetypes.guess_type(name)[0] or "image/jpeg"
+    return f"data:{mime};base64," + base64.b64encode(raw).decode()
+
+
+def _inbox_item(x) -> dict:
+    """把旁听席队列里的条目统一成 `{"text":…, "image":…}`。
+
+    ⚠️ 兼容老的"纯字符串"写法：字符串进了 `.get()` 会直接抛 AttributeError，
+       而那是**在待机线程里**抛的 —— 线程一死就变成"阿包说话没人理"（第 16 条坑的老剧本）。
+       （2026-10-12 加图片时把队列从字符串换成字典，验证脚本当场就把这个坑踩出来了。）
+    """
+    if isinstance(x, dict):
+        return {"text": str(x.get("text") or ""), "image": str(x.get("image") or "")}
+    return {"text": str(x or ""), "image": ""}
+
+
+def guest_vision(guest: dict) -> bool:
+    """这位嘉宾能不能看图？config 里的 `vision` 说了算，没写就**默认能**（实测 5 位里 4 位能）。
+
+    ⚠️ 唯一一位看不到的是千问（`qwen-plus` 是纯文本）—— 它的 config 里显式写了 `vision: false`。
+       实测脚本：`_probe/teatime-check-vision.py`（画张红圆蓝方，看它认不认得出来）。
+    """
+    return bool((guest or {}).get("vision", True))
 
 
 _chosen_topic_index = 0          # ⭐ 阿包在界面上选的议题（0 = 第一个）
@@ -888,7 +962,7 @@ def broadcast(msg: dict) -> None:
         pass
 
 
-def say(who: str, text: str, kind: str = "chat") -> None:
+def say(who: str, text: str, kind: str = "chat", image: str = "") -> None:
     if who == "boss":
         name, org = "阿包", "旁听席"
     elif who == "system":
@@ -898,6 +972,7 @@ def say(who: str, text: str, kind: str = "chat") -> None:
     broadcast({
         "who": who, "name": name, "org": org, "text": text,
         "ts": now_hhmm(), "round": _round_no, "kind": kind,
+        "image": image,          # ⭐ 阿包发的图（/shots/xxx）；没图就是 ""
     })
     print(f"[r{_round_no}] {name or who}: {text[:70]}")
 
@@ -1006,6 +1081,31 @@ def _pick_anthropic_text(data: dict) -> str:
     return "\n".join(p for p in parts if p).strip()
 
 
+def _to_anthropic_content(content):
+    """把 OpenAI 风格的内容（字符串 / 数组）转成 Anthropic 的形状。
+
+    ⚠️ 图片那块两边完全不一样：
+       OpenAI    : `{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,…"}}`
+       Anthropic : `{"type":"image","source":{"type":"base64","media_type":…,"data":…}}`
+    """
+    if isinstance(content, str) or content is None:
+        return content or ""
+    out = []
+    for part in content if isinstance(content, list) else []:
+        if not isinstance(part, dict):
+            continue
+        t = part.get("type")
+        if t == "text":
+            out.append({"type": "text", "text": part.get("text") or ""})
+        elif t == "image_url":
+            url = ((part.get("image_url") or {}).get("url") or "")
+            m = re.match(r"^data:(image/[A-Za-z0-9.+-]+);base64,(.+)$", url, re.S)
+            if m:
+                out.append({"type": "image", "source": {
+                    "type": "base64", "media_type": m.group(1), "data": m.group(2)}})
+    return out or [{"type": "text", "text": ""}]
+
+
 def _anthropic_call(base_url: str, model: str, api_key: str, messages: list,
                     timeout: int, temperature: float, max_tokens) -> str:
     """调一次 Anthropic 原生 `/messages`（纯 urllib，零依赖）。
@@ -1017,9 +1117,11 @@ def _anthropic_call(base_url: str, model: str, api_key: str, messages: list,
     退避重试的规矩跟 OpenAI 那条完全一致（429/5xx/网络异常重试，且优先听服务端建议的等待时间）。
     """
     url = base_url.rstrip("/") + "/messages"
-    system = "\n\n".join(m.get("content") or "" for m in messages
-                         if m.get("role") == "system").strip()
-    conv = [{"role": m["role"], "content": m.get("content") or ""}
+    # ⚠️ system 只会是字符串；user/assistant 的 content 可能是**数组**（带图那种），要转形状
+    system = "\n\n".join(m.get("content") for m in messages
+                         if m.get("role") == "system"
+                         and isinstance(m.get("content"), str)).strip()
+    conv = [{"role": m["role"], "content": _to_anthropic_content(m.get("content"))}
             for m in messages if m.get("role") in ("user", "assistant")]
     payload = {
         "model": model,
@@ -1248,7 +1350,7 @@ class RealTable:
             return ""
         return "\n\n".join(f"（第 {r} 轮）{t}" for r, t in rows)
 
-    def ask(self, guest: dict, prompt: str) -> str:
+    def ask(self, guest: dict, prompt: str, image: str = "") -> str:
         s = self.settings
         name = guest.get("name") or guest["who"]
         sys_prompt = (guest.get("persona") or f"你是{name}。") + "\n\n" + s["style"] + \
@@ -1268,6 +1370,18 @@ class RealTable:
         )
         messages = [{"role": "system", "content": sys_prompt},
                     {"role": "user", "content": user}]
+        # ⭐ 阿包发了图：**能看图的直接看图**；看不到的（千问）明确告诉他"你看不到"，
+        #    别让他猜图里有什么（那是最容易编造的场景）
+        shot_data = image_data_url(image) if image else ""
+        if shot_data and guest_vision(guest):
+            messages[1]["content"] = [
+                {"type": "text", "text": user},
+                {"type": "image_url", "image_url": {"url": shot_data}},
+            ]
+        elif image:
+            messages[1]["content"] = user + (
+                "\n\n【阿包发来一张图】⚠️ 你这类模型看不到图片内容 —— **别猜图里有什么**，"
+                "就基于上面的文字部分回应；想提这张图的话，可以直说「我看不到图，但…」。")
         self.spent_tokens += rough_tokens(sys_prompt) + rough_tokens(user)
         # ⭐ 思考用量**按人取**：在「参会者一览」里拖过的用它自己的，没拖过用 config 默认；
         #    返回 None = 那位被勾了"不限制"（llm_call 收到 None 就压根不传 max_tokens）
@@ -1465,12 +1579,15 @@ class RealTable:
                 pending = list(_boss_inbox)
                 _boss_inbox.clear()
             if pending:
-                q = pending[-1]
-                say("system", f"（阿包介入讨论：「{q[:40]}」）", "system")
+                item = _inbox_item(pending[-1])       # ⭐ {"text":…, "image":…}（兼容老字符串）
+                q = item["text"].strip()
+                shot = item["image"]
+                say("system", f"（阿包介入讨论：「{q[:40]}」{'　＋一张图' if shot else ''}）", "system")
                 for g in self.roster:
                     time.sleep(random.uniform(*s["gap"]))
                     try:
-                        t = self.ask(g, f"阿包（旁听的人类）插了一句：「{q}」—— 请在你的发言里正面回应他。")
+                        t = self.ask(g, f"阿包（旁听的人类）插了一句：「{q}」—— 请在你的发言里正面回应他。",
+                                     image=shot)
                     except Exception as e:
                         say("system", f"（{g['name']} 掉线了：{type(e).__name__}）", "system")
                         continue
@@ -1587,7 +1704,7 @@ def demo_loop() -> None:
             pending = list(_boss_inbox)
             _boss_inbox.clear()
         if pending:
-            q = pending[-1][:24]
+            q = _inbox_item(pending[-1])["text"][:24]
             say("system", f"（回应阿包：「{q}」）", "system")
             for who in order:
                 time.sleep(random.uniform(1.0, 2.0))
@@ -1840,17 +1957,29 @@ def idle_loop(roster: list, settings: dict) -> None:
             _boss_inbox.clear()
         if not pending:
             continue
-        q = pending[-1]
-        say("system", f"（回应阿包：「{q[:24]}」）", "system")
+        item = _inbox_item(pending[-1])          # ⭐ {"text":…, "image":…}（兼容老字符串）
+        q = item["text"].strip()
+        shot = item["image"]
+        say("system", f"（回应阿包：「{q[:24]}」{'　＋一张图' if shot else ''}）", "system")
+        shot_data = image_data_url(shot) if shot else ""
         for g in live_ready():          # ⭐ 用最新的在场名单（休息的那位就不接话了）
             try:
+                base = q or "（阿包发来一张图，想听你说说）"
+                if shot and guest_vision(g) and shot_data:
+                    content = [{"type": "text", "text": base},
+                               {"type": "image_url", "image_url": {"url": shot_data}}]
+                elif shot:
+                    content = base + ("\n\n【阿包发来一张图】⚠️ 你看不到图片内容 —— 别猜图里有什么，"
+                                      "就基于文字回应；可以直说「我看不到图，但…」。")
+                else:
+                    content = base
                 t = llm_call(g["base_url"], g["model"], g["key"], [
                     {"role": "system", "content": (g.get("persona") or "") +
                      "\n\n现在是茶话会的待机时间（还没正式开场）。阿包（人类，在旁听席）跟你说话，"
                      "请直接回应他，一到三句，别写小作文。"
                      "⚠️ 别猜「谁到没到」—— 在场的人由系统标在界面上，你看不到就别提这茬"
                      "（旧文案写着「其他人还没到」，害小克当众说错了话）。"},
-                    {"role": "user", "content": q},
+                    {"role": "user", "content": content},
                 ])
             except Exception as e:
                 say("system", f"（{g['name']} 掉线了：{type(e).__name__}: {str(e)[:80]}）", "system")
@@ -1939,7 +2068,7 @@ class Handler(SimpleHTTPRequestHandler):
     def end_headers(self):
         # ⭐ 2026-10-10：改了界面但浏览器一直拿缓存里的旧页（标题/弹窗都不更新），
         #    本地服务性能无所谓 —— 一律 no-store，改完刷新即生效。
-        if not self.path.startswith("/avatars"):
+        if not (self.path.startswith("/avatars") or self.path.startswith("/shots")):
             self.send_header("Cache-Control", "no-store, must-revalidate")
             self.send_header("Pragma", "no-cache")
         super().end_headers()
@@ -1974,6 +2103,27 @@ class Handler(SimpleHTTPRequestHandler):
                 with _lock:
                     if q in _clients:
                         _clients.remove(q)
+            return
+        if self.path.startswith("/shots/"):        # ⭐ 阿包发的图（存在 shots/，不进 static）
+            name = self.path.split("?", 1)[0][len("/shots/"):]
+            if not name or "/" in name or "\\" in name or ".." in name:
+                self.send_error(404)
+                return
+            p = ROOT / "shots" / name
+            if not p.exists() or not p.is_file():
+                self.send_error(404)
+                return
+            try:
+                data = p.read_bytes()
+            except Exception:
+                self.send_error(500)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", mimetypes.guess_type(name)[0] or "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "max-age=86400")   # 图片可以缓存（end_headers 里跳过了它）
+            self.end_headers()
+            self.wfile.write(data)
             return
         if self.path == "/topics":                 # ⭐ 给界面弹议题选择框 / 议题一览用
             s = load_settings()
@@ -2301,10 +2451,13 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception:
             data = {}
         text = (data.get("text") or "").strip()
-        if text:
+        # ⭐ 阿包可以**带一张图**（前端已经压过了：最长边 1280、JPEG），
+        #    存成 shots/xxx 后把 URL 放进队列 —— 嘉宾发言时再读回来转 data URL
+        shot = save_shot(data.get("image") or "") if data.get("image") else ""
+        if text or shot:
             with _lock:
-                _boss_inbox.append(text)
-            say("boss", text)
+                _boss_inbox.append({"text": text, "image": shot})
+            say("boss", text, image=shot)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()

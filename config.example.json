@@ -62,6 +62,8 @@
       "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
       "_note": "⭐ 国际站（阿包在 alibabacloud.com 注册的）。国内站 dashscope.aliyuncs.com 要 +86 手机验证，他在日本收不到短信 → 用不了",
       "model": "qwen-plus",
+      "_vision_note": "⚠️ qwen-plus 是**纯文本**模型，看不到图 —— 实测它自己说「我无法看到或访问任何图像」。阿包发图时它会收到一句「你看不到图，别猜」的说明（而不是收到图）。要看图得换 qwen-vl 那一系。",
+      "vision": false,
       "key_names": [
         "qwen",
         "DASHSCOPE_API_KEY"

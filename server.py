@@ -984,6 +984,32 @@ class RealTable:
         say("system", f"📝 第 {r} 轮纪要（写入公用历史框）：\n{note.strip()}", "system")
         self._hist_progress(r)         # ⭐ 议题库要显示"讨论到第几轮"
 
+    def _pause_between_rounds(self, r: int) -> bool:
+        """⭐ 一轮讲完：手动模式下停下等阿包点「▶ 开始下一轮」。
+
+        返回 True = 继续下一轮；False = 该收工了（他按了结束议题 / 触到预算）。
+
+        ⚠️ 2026-10-11 晚修：**"阿包插话"那一轮也必须走这里**。
+           以前插话分支末尾直接 `continue`，于是插话那轮讲完既不发「▶ 开始下一轮」、
+           也不停，直接开了下一轮 —— 阿包当场看出来的：
+           "第一轮结束的时候顺利的出现了进入下一轮的按钮，但是进入之后，
+            第二轮没有显示这个按钮而是直接开启了第三轮"。
+        """
+        s = self.settings
+        if _auto_next or r >= s["rounds"]:      # 自动模式 / 最后一轮：不用停
+            return True
+        why = _wait_next_round(r, self)
+        if why == "stop":
+            say("system", f"🛑 阿包结束了讨论（第 {r} 轮讲完）—— "
+                          f"可以点「整理会议记录」让我汇总", "system")
+            self._hist_progress(r, finished=True)
+            return False
+        if why == "budget":
+            say("system", "💸 触到预算上限，先散会 —— 想继续就把 budget_cny 调大", "system")
+            self._hist_progress(r, finished=True)
+            return False
+        return True
+
     def run(self) -> None:
         s = self.settings
         names = "、".join(g["name"] for g in self.roster)
@@ -1055,6 +1081,10 @@ class RealTable:
                     say(g["who"], t)
                     self._record(g, r, t)
                 self._write_notes(r)
+                # ⭐ 插话轮讲完也要按「手动 / 自动」的节奏停一下 ——
+                #    这就是上面那个 bug：原来这里一句 continue 就滑进下一轮了
+                if not self._pause_between_rounds(r):
+                    return
                 continue
 
             shift = (r - 1) % len(self.roster)
@@ -1102,17 +1132,8 @@ class RealTable:
 
             # ⭐ 手动模式（默认）：停下等阿包点「▶ 开始下一轮」
             #    （点了「⚡ 自动」就跳过这里，像以前那样一口气跑完）
-            if (not _auto_next) and r < s["rounds"]:
-                why = _wait_next_round(r, self)
-                if why == "stop":
-                    say("system", f"🛑 阿包结束了讨论（第 {r} 轮讲完）—— "
-                                  f"可以点「整理会议记录」让我汇总", "system")
-                    self._hist_progress(r, finished=True)
-                    return
-                if why == "budget":
-                    say("system", "💸 触到预算上限，先散会 —— 想继续就把 budget_cny 调大", "system")
-                    self._hist_progress(r, finished=True)
-                    return
+            if not self._pause_between_rounds(r):
+                return
 
         self._hist_progress(s["rounds"], finished=True)      # ⭐ 议题库要能看出"讨论完了没"
         say("system", f"讨论结束（{s['rounds']} 轮）· 粗估 {self.spent_tokens} tokens", "system")

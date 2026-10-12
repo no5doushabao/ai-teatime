@@ -51,10 +51,17 @@ ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 
 # ── 桌面阵容（头像/名字/组织；真接入时 model/base_url 从 config 覆盖）──
+# ⚠️ 这张表是 `who → 名字/组织` 的**显示映射**（日志、界面气泡都问它）。
+#    config 里加人时这里也得加一条 —— 漏了不会报错，只会**悄悄回落成小写的 who、
+#    组织空着**：2026-10-12 的日志里 gemini 那条就写着 `**16:35 gemini**` 而不是
+#    `Gemini`（它一直没在这张表里），排查身份问题时白绕了一圈。
 GUESTS = [
     ("ayu",    "阿鱼",     "DeepSeek"),
     ("grok",   "Grok",     "xAI"),
     ("qwen",   "千问",     "通义千问"),
+    ("glm",    "智谱",     "GLM"),
+    ("sf",     "小流",     "硅基流动"),
+    ("gemini", "Gemini",   "Google"),
     ("claude", "Claude",   "Anthropic"),
     ("gpt",    "GPT",      "OpenAI"),
 ]
@@ -553,15 +560,22 @@ def write_topics(items: list) -> bool:
     return True
 
 
-def delete_topic(index: int) -> bool:
-    """⭐ 删掉一个议题（议题一览里的「删除」按钮）。"""
+def delete_topic(index: int, expect: str = "") -> bool:
+    """⭐ 删掉一个议题（议题一览里的「删除」按钮）。
+
+    `expect` = 界面上那条议题的题目，用来**挡住"下标漂移"**：
+    议题一览是按住拖动排序的，拖动只改了顺序、界面手里那个下标却可能还是旧的，
+    拿旧下标来删就会**删掉别人那条**（和 `edit_topic` 是同一个坑，2026-10-12）。
+    """
     items = parse_topics()
     if not items or not (0 <= int(index) < len(items)):
         return False
+    if expect and items[int(index)]["title"].strip() != expect.strip():
+        return False          # 下标指到别条去了 —— 宁可不删
     return write_topics([t for i, t in enumerate(items) if i != int(index)])
 
 
-def edit_topic(index, title: str, reason: str, author: str):
+def edit_topic(index, title: str, reason: str, author: str, expect: str = ""):
     """⭐ 编辑一条议题（议题整理里的「✏️ 编辑」按钮）。
 
     三个字段都能改：题目 / 理由正文 / 由谁提供。
@@ -570,6 +584,14 @@ def edit_topic(index, title: str, reason: str, author: str):
 
     ⚠️ 改了题目的话，把 `debate-history.json` 里的旧题目一并改过来 ——
        战绩是按题目名匹配的，不改的话「已讨论 N 个轮次 / 参与者」当场断链。
+
+    ⭐ `expect` = 界面上那条议题的**当前题目**（前端原样回传）。
+       它是"下标漂移"的保险丝（阿包 2026-10-12 撞的那个 bug）：
+       议题一览支持拖动排序，而拖动只改顺序、不改界面手里的下标 ——
+       排完序再点编辑，旧下标就指到**别人那条**上去了。结果分两种：
+         · 题目没改 → 撞上判重，弹「已经有同名的议题了」（他报的就是这个）；
+         · 题目改了 → **静默改错条目**，把别人那条的题目和理由覆盖掉（更坏）。
+       所以：对不上就直接拒绝，让他重开一下议题整理 —— 宁可不动，也不能改错人。
 
     返回 `(ok, 说明)`：说明文字留着给界面显示失败原因 / 迁移了几场。
     """
@@ -583,6 +605,8 @@ def edit_topic(index, title: str, reason: str, author: str):
     new_title = (title or "").strip()
     if not new_title:
         return False, "议题题目不能空着"
+    if expect and items[i]["title"].strip() != expect.strip():
+        return False, "列表顺序刚变过（多半是你刚拖动过）—— 关掉议题整理、重开一次再来改"
     if any(j != i and t["title"].strip() == new_title for j, t in enumerate(items)):
         return False, "已经有同名的议题了"
 
@@ -725,7 +749,10 @@ def save_history(h: dict) -> None:
 
 # ── ⭐ 「继续讨论」：把上一次的记录翻出来（阿包 2026-10-11 晚要的）──────
 #   原话：「需要把之前的记录翻出来呢，要不然就不是继续聊，而是重新聊了」
-RECAP_MAX = 4000        # 前情提要最多带这么多字（省 token，别把上下文撑爆）
+RECAP_MAX = 6000        # 前情提要最多带这么多字（省 token，别把上下文撑爆）
+RECAP_ROUNDS_MAX = 2000  # ⭐ 其中「逐轮整理」的额度（2026-10-12 定：两份都带）
+RECAP_SUMMARY_MAX = 4000 # ⭐ 其中「会议总览」的额度
+SPEECH_KEEP = 900       # ⭐ 续场时，各人"上次自己说过的话"每段最多带这么多字（2026-10-12 加）
 
 
 def log_safe_topic(topic: str) -> str:
@@ -768,20 +795,108 @@ def find_last_debate(topic: str, exclude=None):
     return hits[0] if hits else None
 
 
+def _cut_after_debate(txt: str) -> str:
+    """切掉「散场之后」的部分：待机闲聊 + 末尾那张《会议纪要（阿鱼整理）》大卡片。
+
+    两个用处：① 从上次日志里抽"各人**自己**说过的话"（续场用）；
+              ② 从日志里捡「余味」的"你最后说的话"。
+
+    ⚠️ 两件都会翻车的事：
+      · 散场后大家在待机里闲聊，那些话**顶着最后一轮的轮号**，不切就会被当成"讨论里说过的话"；
+      · 会议纪要那张卡片是多行文本（`say("ayu", …, "summary")`），不切会被当成"阿鱼最后说的话"。
+    """
+    txt = (txt or "").split("# 📝 会议纪要（阿鱼整理）", 1)[0]
+    return re.split(r"^- \*\*\d{2}:\d{2} system\*\*：\s*(?:讨论结束|🛑|💸)",
+                    txt, maxsplit=1, flags=re.M)[0] or txt
+
+
+def extract_speeches(txt: str) -> dict:
+    """从一场讨论的日志里按人抽出"他说过的话"（带轮号）。
+
+    干什么用：「继续讨论」时要把**各人自己**上次的发言接回上下文 ——
+    阿包 2026-10-12 的原话：「我新跑了一轮上面的议题。怎么感觉大家似乎又回到了第一轮的样子，
+    好像之前没讨论过。」真因就是：公用历史框里只有**阿鱼整理的纪要**（第三方口吻），
+    模型不把它当"我说过的话"，于是每个人从自己的立场从头再讲一遍。
+    """
+    txt = _cut_after_debate(txt)
+    out, state = {}, {"round": 0, "who": "", "buf": []}
+
+    def flush() -> None:
+        text = "\n".join(state["buf"]).strip()
+        if state["who"] and text and not text.startswith("#"):
+            out.setdefault(state["who"], []).append((state["round"], text[:SPEECH_KEEP]))
+        state["who"], state["buf"] = "", []
+
+    for line in txt.splitlines():
+        m = re.match(r"^- \*\*\d{2}:\d{2} ([^*]+?)\*\*：(.*)$", line)
+        if m:
+            flush()
+            who, text = _who_of(m.group(1)), m.group(2)
+            if not who:                       # system / 阿包 的话不算
+                mr = re.search(r"—— 第 (\d+) 轮 ——", text)
+                if mr:
+                    state["round"] = int(mr.group(1))
+                continue
+            state["who"], state["buf"] = who, [text]
+        elif state["who"]:
+            state["buf"].append(line)         # 一条发言的后续行
+    flush()
+    return out
+
+
+def previous_speeches(path) -> dict:
+    """上一次那场里**每个人最后两段**发言（续场时接到「你自己的历次发言」里）。"""
+    try:
+        txt = Path(path).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+    got = extract_speeches(txt)
+    return {who: rows[-2:] for who, rows in got.items() if rows}
+
+
+def latest_summary(topic: str, exclude=None):
+    """⭐ 这个议题**最近一份会议总览**（《会议纪要（阿鱼整理）》），可能在更早的场。
+
+    「余味」和续场都要用它：阿包 2026-10-12 定的是「逐轮整理 + 最后总览」**两份都喂**。
+    返回 `(文本, 那场的时间)`；没有就返回 `("", "")`。
+    """
+    for p in find_debates(topic, exclude=exclude):
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        mark = "# 📝 会议纪要（阿鱼整理）"
+        if mark in txt:
+            rec = txt.split(mark, 1)[1].strip()
+            if rec:
+                s = p.stem
+                return (rec[:RECAP_SUMMARY_MAX],
+                        f"{s[:4]}-{s[4:6]}-{s[6:8]} {s[9:11]}:{s[11:13]}")
+    return "", ""
+
+
 def build_recap(topic: str, exclude=None):
-    """⭐ 翻出上一次聊这个议题的要点，做成"前情提要"。
-    返回 `(文本, 来源说明, 上次聊到第几轮)` —— 文本为空 = 没翻到（这一场只能当新议题聊）。
+    """⭐ 翻出上一次聊这个议题的**两份记录**，做成"前情提要"。
+    返回 `(文本, 来源说明, 上次聊到第几轮, 那场的日志路径)` —— 文本为空 = 没翻到（这场只能当新议题聊）。
 
-    取法优先拿**已经提炼过的**（省 token）：
-      ① 上一场结尾的**会议纪要**（阿鱼整理的那份大总结）
-      ② 没纪要就拼各轮的**公用历史框小纪要**
+    ⭐⭐ 2026-10-12 晚（阿包拍板）：**两份都带上** —— 他的原话：
+       「阿鱼不是会整理每一轮大家的发言吗？然后最后会生成一个总览。
+        我想说的就是，续读和结束时的闲聊给大家喂的就是这两部分。」
+    所以这里拼两段，缺哪份就只带有的那份：
+      ① **逐轮整理**（阿鱼每轮写进公用历史框的小纪要）—— 取**最近一场**的
+      ② **会议总览**（那份《会议纪要（阿鱼整理）》）—— 取**最近一份有的**
+         （最近的场只跑了 1 轮、又没点「帮我整理」时，总览得往前翻到更早那场）
+    ⚠️ 两份可能来自**不同的场次**，所以各自标上时间，别让读的人以为是一场的。
 
-    ⚠️ 会**一场一场往前翻**：最近那场如果是"空壳"（只点了开场、一轮没跑起来），
-       就继续找更早的 —— 否则明明有真记录，却因为最近一个是空的而用不上。
+    ⚠️ 会**一场一场往前翻**：空壳场（点了开场、一轮没跑起来）自动跳过。
 
     第三个返回值（上次那场日志里 `—— 第 N 轮 ——` 的最大 N）用来**接着数轮号**：
        上次聊到第 2 轮 → 这一场从「第 3 轮」开始（阿包 10-11 晚：「想从第三轮开始」）。
+    第四个是**逐轮整理那场**的日志文件 —— `previous_speeches()` 拿它抽各人自己的发言。
     """
+    rounds_txt, rounds_from, rounds_n, rounds_path = "", "", 0, None
+    summary, summary_from = "", ""
+    last_round = 0
     for p in find_debates(topic, exclude=exclude):
         try:
             txt = p.read_text(encoding="utf-8", errors="replace")
@@ -789,24 +904,37 @@ def build_recap(topic: str, exclude=None):
             continue
         s = p.stem
         when = f"{s[:4]}-{s[4:6]}-{s[6:8]} {s[9:11]}:{s[11:13]}"
-        seen = [int(x) for x in re.findall(r"—— 第 (\d+) 轮 ——", txt)]
-        last_round = max(seen) if seen else 0
+        if not rounds_txt:                       # ① 逐轮整理：只要**最近一场**的
+            notes = [(n, t.strip()) for n, t in
+                     re.findall(r"📝 第 (\d+) 轮纪要（写入公用历史框）：\n(.*?)(?=\n- \*\*|\Z)",
+                                txt, re.S) if t.strip()]
+            if notes:
+                rounds_txt = "\n\n".join(f"### 第 {n} 轮\n{t}" for n, t in notes)
+                rounds_from, rounds_n, rounds_path = when, len(notes), p
+                seen = [int(x) for x in re.findall(r"—— 第 (\d+) 轮 ——", txt)]
+                last_round = max(seen) if seen else 0
+        if not summary:                          # ② 总览：往前翻到**最近一份有的**
+            mark = "# 📝 会议纪要（阿鱼整理）"
+            if mark in txt:
+                rec = txt.split(mark, 1)[1].strip()
+                if rec:
+                    summary, summary_from = rec, when
+        if rounds_txt and summary:
+            break
 
-        mark = "# 📝 会议纪要（阿鱼整理）"
-        if mark in txt:
-            rec = txt.split(mark, 1)[1].strip()
-            if rec:
-                return (f"【上一次（{when}）的会议纪要 · 阿鱼整理】\n{rec}"[:RECAP_MAX],
-                        f"{when} 那场的会议纪要", last_round)
+    if not (rounds_txt or summary):
+        return "", "", 0, None
 
-        notes = [(n, t.strip()) for n, t in
-                 re.findall(r"📝 第 (\d+) 轮纪要（写入公用历史框）：\n(.*?)(?=\n- \*\*|\Z)", txt, re.S)
-                 if t.strip()]
-        if notes:
-            body = (f"【上一次（{when}）的逐轮要点】\n" +
-                    "\n\n".join(f"### 第 {n} 轮\n{t}" for n, t in notes))
-            return body[:RECAP_MAX], f"{when} 那场的逐轮要点（{len(notes)} 轮）", last_round
-    return "", "", 0
+    body = "【上一次的记录 · 阿鱼整理的两份】"
+    desc = []
+    if rounds_txt:
+        body += (f"\n\n## ① 逐轮整理（{rounds_from} 那场，共 {rounds_n} 轮）\n"
+                 f"{rounds_txt[:RECAP_ROUNDS_MAX]}")
+        desc.append(f"{rounds_from} 那场的逐轮整理（{rounds_n} 轮）")
+    if summary:
+        body += f"\n\n## ② 会议总览（{summary_from} 那场）\n{summary[:RECAP_SUMMARY_MAX]}"
+        desc.append(f"{summary_from} 那场的会议总览")
+    return body[:RECAP_MAX], " ＋ ".join(desc), last_round, rounds_path
 
 
 # ── ⭐ 往期讨论（阿包 2026-10-11 下午要的）──────────────────────────
@@ -1287,6 +1415,28 @@ def llm_call(base_url: str, model: str, api_key: str, messages: list,
     raise last if last else RuntimeError("llm_call: 没有可用的参数组合")
 
 
+def strip_self_title(text: str) -> str:
+    """⭐ 剥掉模型**自己加在开头**的"第 N 轮发言"标题。
+
+    阿包 2026-10-12 看到的：「阿鱼在我继续讨论第六轮的时候，发言一上来就是
+    「阿鱼的第一轮发言」」—— 日志里原样是 `# 阿鱼 · 第1轮发言`。
+    为什么会有：prompt 里以前**从来没告诉它现在是第几轮**（`_round_no` 只用于界面显示），
+    续场时它手里只有"上次聊到第 5 轮"和一堆旧发言，就自己猜成"第 1 轮"，还标了个大标题。
+    治本在 `ask()` 里把当前轮次喂准（同一天补的）；这里只是保险。
+
+    ⚠️ 只动**首行**，而且那一行必须同时含「第 N 轮」和「发言」才剥 ——
+       正文里的 markdown 标题（`# 立场：…`）一律不许碰。
+    """
+    lines = (text or "").lstrip().splitlines()
+    if not lines:
+        return text
+    head = lines[0].strip().strip("*# 　").strip()
+    if len(head) <= 40 and "发言" in head and re.search(r"第\s*\d+\s*轮", head):
+        rest = "\n".join(lines[1:]).lstrip()
+        return rest or text
+    return text
+
+
 def strip_leading_tag(text: str) -> str:
     """⭐ 兜底：模型偶尔会"越位"——开头写「【千问】」之类别人的名字。
     名字本来就由系统自动标注，这里把这种开头标签剥掉，免得界面上看着像署名错位。
@@ -1363,13 +1513,30 @@ class RealTable:
             f"绝对不要替其他与会者写发言、不要用别人的口吻说话、" \
             f"也不要在开头写「【某某】」这种标签——你的名字由系统自动标注。" \
             f"要回应别人时，用「{name}认为…」这种第三人称提及，而不是替他说话。"
+        # ⭐ 把"现在是第几轮"**明明白白喂给她**（阿包 2026-10-12 看到的
+        #    「阿鱼的第一轮发言」就是这么来的：续场第 6 轮，她手里只有"上次聊到第 5 轮"
+        #    和一堆旧发言，就自己猜成"第 1 轮"，还在开头标了个大标题）
+        cur = int(_round_no or 1)
+        if self.round_offset:
+            cont = (f"【当前轮次 · 续场】这是本议题的**第 {cur} 轮**"
+                    f"（上一次那场聊到第 {self.round_offset} 轮，本场接着往下数）。"
+                    f"你**在那场里说过的话**已经接在下面「你自己的历次发言」里 —— "
+                    f"**接着自己的立场往前推**（深化 / 修正 / 反驳别人），"
+                    f"**不要把讲过的论点从头再讲一遍**。\n\n")
+        else:
+            cont = f"【当前轮次】这是本议题的**第 {cur} 轮**。\n\n"
+        # ⚠️ 顺带把"别自己写标题"说死：轮次和名字由系统在外面标，她自己写就容易写错
+        sys_prompt += (f"\n\n⚠️ 别在发言开头自己加标题 ——「第 N 轮发言」「{name}的发言」"
+                       f"这类字眼都不要写（轮次和名字由系统标注）。现在进行的是**第 {cur} 轮**，"
+                       f"直接进正文就行；真要提到轮次，也只说这个数字。")
         user = (
             f"【本次议题】{s['topic']}\n{s.get('topic_body') or ''}\n\n"
+            f"{cont}"
             f"【公用历史框 · 前几轮要点】（阿鱼整理，全员共享）\n"
             f"{self.notes or '（本议题刚开始，还没有历史要点）'}\n\n"
             f"【本轮已发言 · 原文】（⚠️ 先读完再开口）\n"
             f"{self.round_so_far() or '（你是本轮第一个发言的）'}\n\n"
-            f"【你自己的历次发言】\n{self.my_history(guest) or '（你还没发过言）'}\n\n"
+            f"【你自己的历次发言】{self.my_history(guest) or '（你还没发过言）'}\n\n"
             f"{prompt}"
         )
         messages = [{"role": "system", "content": sys_prompt},
@@ -1402,7 +1569,7 @@ class RealTable:
                 text = ""
         if not (text or "").strip():
             text = "（这一轮没能说出话来 —— 输出额度是空的，多半是推理 token 吃光了预算）"
-        text = strip_leading_tag(text)     # ⭐ 兜底：剥掉模型自己加的【某某】开头
+        text = strip_self_title(strip_leading_tag(text))   # ⭐ 兜底：剥【某某】标签 + 自加的"第 N 轮发言"标题
         self.spent_tokens += rough_tokens(text)
         if self.spent_tokens / 1_000_000 * 10 > s["budget_cny"]:
             self.over_budget = True
@@ -1510,6 +1677,13 @@ class RealTable:
         try:
             self._run_inner()
         finally:
+            # ⭐ 散场就留"余味"：跑完 / 被「结束议题」掐掉 / 超预算 / 半路抛异常，哪条路都留
+            #    —— 待机闲聊要记得刚聊过什么（阿包 2026-10-12：「最后的茶会闲聊
+            #    却又恢复了什么都没说过的时候」）
+            try:
+                remember_debate(self)
+            except Exception:
+                pass
             _debating = False
 
     def _run_inner(self) -> None:
@@ -1530,6 +1704,16 @@ class RealTable:
                     if self.round_offset else "")
             say("system", f"📜 接着上一次聊 —— 已把{s.get('recap_from') or '上一次的记录'}"
                           f"翻出来放进公用历史框（{len(recap)} 字）{tail}。开头是：\n{brief}…", "system")
+            # ⭐ 再把**各人自己**上次的发言接进「你自己的历次发言」（2026-10-12）——
+            #    阿包的原话：「我新跑了一轮上面的议题。怎么感觉大家似乎又回到了第一轮的样子，
+            #    好像之前没讨论过。」真因：公用历史框是**阿鱼整理的纪要**（第三方口吻），
+            #    模型不把它当"我说过的话"，于是每人从自己的立场从头再讲一遍。
+            prev = s.get("prev_speeches") or {}
+            for who, rows in prev.items():
+                self.by_guest.setdefault(who, []).extend(rows)
+            if prev:
+                say("system", f"🧷 也把各位**自己**上一次的发言接上了（{len(prev)} 位）—— "
+                              f"本轮接着自己的立场往下讲就行，不用从头再来一遍", "system")
         self._hist_begin()             # ⭐ 记一笔：议题 / 参与者 / 计划轮数
 
         # ⭐ 第一轮谁先开口（2026-10-11 修）：**命题人优先** —— 他在桌上就让他先讲；
@@ -1549,6 +1733,16 @@ class RealTable:
             else:
                 tail = (f"③ 点出一个最值得先争的地方，然后把话头交给**{first['name']}**"
                         f"（本轮第一位发言者，接下来就是他开口）。")
+            # ⭐ 续场的开场白不能像"新议题"（阿包 2026-10-12：
+            #    「如果是已经讨论过的议题，就应该提一嘴，这是继续的讨论」）
+            if self.round_offset:
+                tail += (f"\n④ ⚠️ **这是接着上一次的继续讨论**（上次聊到第 {self.round_offset} 轮，"
+                         f"本场从第 {self.round_offset + 1} 轮接着数，整个议题聊到第 {self.end_round} 轮收尾）："
+                         f"开场白里必须**明确说出来**这是接着上次继续聊 —— 提一句上次聊到了哪儿、"
+                         f"这回该往哪个方向推。**不要**像第一次开这个议题那样从头介绍背景。"
+                         f"\n⑤ 顺带重申一条规则：举具体例子（事件 / 数据 / 论文 / 产品 / 新闻）"
+                         f"必须给出**可核实的来源**（机构或作者 + 标题 + 年份，有网址就贴网址）；"
+                         f"给不出出处就别当事实讲，更不许编一个像真的出处。")
             try:
                 intro = llm_call(host["base_url"], host["model"], host["key"], [
                     {"role": "system", "content": (host.get("persona") or "") +
@@ -1786,7 +1980,7 @@ def summarize_debate() -> str:
     为什么读日志而不是读内存：讨论一结束，那个 RealTable 实例就没了；
     日志文件才是整场最完整的记录（而且它在磁盘上，随时能重跑总结）。
     """
-    global _last_log_path
+    global _last_log_path, _afterglow
     p = Path(_last_log_path) if _last_log_path else None
     if p is None or not p.exists():
         # ⭐ 兜底：服务一重启 `_last_log_path` 就没了，可阿包可能还想整理**刚才那场** ——
@@ -1844,6 +2038,19 @@ def summarize_debate() -> str:
     except Exception:
         pass
     say("ayu", text.strip(), "summary")      # ⭐ kind=summary：前端渲染成大卡片
+    # ⭐ 把这份总览**回填进「余味」**：散场后的闲聊也要读得到它
+    #    （阿包 2026-10-12 定的是「逐轮整理 + 最后总览」两份都喂给所有人）。
+    #    ⚠️ 只有"刚聊完那一场就是这个议题"时才回填 —— 免得把旧议题的总览塞进当前的余味。
+    try:
+        mt = re.search(r"^- 议题：(.*)$", body, re.M)
+        t = mt.group(1).strip() if mt else ""
+        if t and t == (_afterglow.get("topic") or "").strip():
+            _afterglow["summary"] = text.strip()[:RECAP_SUMMARY_MAX]
+            _afterglow["summary_from"] = _afterglow.get("when") or ""
+            save_afterglow()
+            say("system", "🧠 这份总览也进了「余味」—— 回待机接着聊时，大家读得到", "system")
+    except Exception:
+        pass
     return text
 
 
@@ -1902,21 +2109,240 @@ def start_requested(resume: bool = False) -> bool:
     _start_settings.pop("recap", None)
     _start_settings.pop("recap_from", None)
     _start_settings.pop("resume_from", None)
+    _start_settings.pop("prev_speeches", None)
     if resume:
         # ⚠️ 只有**刚刚新建**的那个空日志才要排除 —— 它的时间戳最新，不排除会翻到它自己。
         #    **同一议题重开时不会新建文件**，那时 `_log_path` 就是"上一次那场"（有内容），
         #    再排除它等于把要翻的记录本身扔掉 —— 阿包 10-11 晚就是这么撞上的：
         #    聊完两轮想接着从第三轮开，界面上却提示"没翻到上一次的记录"。
-        recap, src, last_round = build_recap(want, exclude=_log_path if fresh else None)
+        recap, src, last_round, prev_path = build_recap(want, exclude=_log_path if fresh else None)
         if recap:
             _start_settings["recap"], _start_settings["recap_from"] = recap, src
             _start_settings["resume_from"] = last_round        # ⭐ 本场轮号接着上次往下数
+            # ⭐ 再把**各人自己**上次的发言接上（2026-10-12）：
+            #    公用历史框里只有"阿鱼整理的纪要"，模型不把它当"我说过的话" ——
+            #    于是续场第一轮每个人都从自己的立场从头再讲一遍，看着像"什么都没聊过"。
+            prev = previous_speeches(prev_path) if prev_path else {}
+            if prev:
+                _start_settings["prev_speeches"] = prev
         else:
             say("system", "📜 想接着上次聊，但没翻到上一次的记录 —— 这一场只能从头来", "system")
 
     _stop_event.clear()              # ⭐ 新一场开始，清掉上一场的"结束"信号
     _start_event.set()
     return True
+
+
+# ── ⭐ 讨论结束后的「余味」（afterglow）：待机闲聊得记得刚聊过什么 ──────────────
+#    阿包 2026-10-12 的原话：「如果讨论结束了，大家是回归讨论还没开始的等待状态，
+#    这是不对的。明明大家刚刚已经经历过了一次很长很长的讨论了，
+#    最后的茶会闲聊却又恢复了什么都没说过的时候。」
+#    ⚠️ 原来待机回复的上下文里**只有阿包那一句话** —— 刚聊完 5 轮的议题、各自的立场、
+#       阿鱼每轮整理的纪要，全都不见了；所以她们表现得像第一次见面
+#       （还害 Gemini 把别人的设定认领了，见「待机 prompt 没钉身份」那条）。
+#    现在两头都补上：
+#      ① 讨论一结束就把"余味"（议题 + 纪要 + 自己最后说的话）记下来，**落盘** ——
+#         阿包双击启动器就是重启服务，不落盘的话记忆活不过一次重启；
+#      ② 待机里的闲聊也按顺序记最近几条 —— 同一批回复之间互相看得见
+#         （不然千问刚说"克劳德腹黑？"，Gemini 那边压根不知道，还会认错人）。
+_afterglow = {"topic": "", "when": "", "rounds": 0, "notes": "", "mine": {},
+              "file": "", "summary": "", "summary_from": ""}
+_IDLE_TALK_MAX = 6        # 待机闲聊只记最近这么几条
+_idle_talk = []           # [{"who": …, "text": …}]
+
+
+def _afterglow_path() -> Path:
+    # ⚠️ 写成函数而不是模块级常量：自测会把 ROOT 临时指到别处（跟 _think_path() 同理）
+    return ROOT / "afterglow.json"
+
+
+def save_afterglow() -> bool:
+    try:
+        _afterglow_path().write_text(
+            json.dumps(_afterglow, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def load_afterglow() -> dict:
+    """读回上一次的「余味」。没有 / 坏了都当没有，绝不抛。"""
+    global _afterglow
+    try:
+        d = json.loads(_afterglow_path().read_text(encoding="utf-8"))
+        if isinstance(d, dict):
+            _afterglow = {
+                "topic": str(d.get("topic") or ""),
+                "when": str(d.get("when") or ""),
+                "rounds": int(d.get("rounds") or 0),
+                "notes": str(d.get("notes") or ""),
+                "mine": {str(k): [str(x) for x in (v or [])]
+                         for k, v in (d.get("mine") or {}).items()},
+                "file": str(d.get("file") or ""),
+                # ⭐ 阿鱼那份总览（含每轮每人的立场汇总）—— 散场闲聊也要读它
+                "summary": str(d.get("summary") or ""),
+                "summary_from": str(d.get("summary_from") or ""),
+            }
+    except Exception:
+        _afterglow = {"topic": "", "when": "", "rounds": 0, "notes": "", "mine": {},
+                      "file": "", "summary": "", "summary_from": ""}
+    return _afterglow
+
+
+def remember_debate(table) -> None:
+    """⭐ 一场讨论刚跑完 → 把"余味"记下来（待机闲聊要用）。
+
+    在 `RealTable.run()` 的 finally 里调用 —— 正常跑完、被「结束议题」掐掉、
+    触到预算、半路抛异常，哪条路散场都留得下记忆。
+    """
+    global _afterglow, _idle_talk
+    notes = (getattr(table, "notes", "") or "").strip()[:6000]
+    topic = (table.settings.get("topic") or "").strip()
+    # 每人留**最后两段**发言（待机时她要接得上自己刚说过的话）
+    mine = {who: [t[:600] for _r, t in rows[-2:]]
+            for who, rows in (getattr(table, "by_guest", {}) or {}).items() if rows}
+    if not notes and not mine:
+        # ⭐ 空壳场（点了开场又立刻结束，一句都没说）—— 别拿它冲掉上一次的余味
+        return
+    # ⭐ 阿鱼那份**总览**也带上（阿包 2026-10-12：「续读和结束时的闲聊给大家喂的就是这两部分」）——
+    #    本场刚散场时还没生成总览，所以往前翻到**这个议题最近一份有的**（可能来自更早的场）。
+    sum_txt, sum_from = latest_summary(topic, exclude=_log_path) if topic else ("", "")
+    _afterglow = {
+        "topic": topic,
+        "when": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "rounds": max(0, int(getattr(table, "end_round", 0))
+                      - int(getattr(table, "round_offset", 0))),
+        "notes": notes,
+        "mine": mine,
+        "file": _log_path.name if _log_path else "",
+        "summary": sum_txt,
+        "summary_from": sum_from,
+    }
+    save_afterglow()
+    _idle_talk = []      # 讨论刚结束 = 闲聊重新开始，别把讨论前那几句混进来
+
+
+def _who_of(display: str) -> str:
+    """把日志里的显示名对回 `who`（日志写的是 `name or who`：可能是 `Claude`，也可能是小写的 `gemini`）。"""
+    d = (display or "").strip().lower()
+    if not d:
+        return ""
+    for w, n, _o in GUESTS:
+        if d == w.lower() or d == (n or "").lower():
+            return w
+    return _NAME_ALIAS.get(d, "")
+
+
+def afterglow_from_logs() -> dict:
+    """⭐ 兜底：从最近一场**真有内容**的日志里把"刚才那场"捡回来。
+
+    什么时候用得上：`afterglow.json` 还没有 / 被删了 / 换了台机器 ——
+    阿包双击启动器就是重启服务，光靠内存里的变量，记忆活不过一次重启。
+    """
+    for d in list_past_debates()[:4]:
+        txt = read_past_debate(d.get("file") or "", "full")
+        if not txt:
+            continue
+        # ⚠️ 末尾那张《会议纪要（阿鱼整理）》+ 散场后的闲聊都要先切掉，
+        #    不然它们会被当成"某某在讨论里最后说的话"（真日志里就这么翻车过）
+        txt = _cut_after_debate(txt)
+        topic = d.get("topic") or ""
+        m = re.search(r"本次议题：(.+)$", txt, re.M)
+        if m:
+            topic = m.group(1).strip()
+        notes = "\n\n".join(
+            f"### 第 {n} 轮\n{body.strip()}"
+            for n, body in re.findall(
+                r"📝 第 (\d+) 轮纪要（写入公用历史框）：\n(.*?)(?=\n- \*\*|\Z)", txt, re.S))
+        mine = {}
+        for m2 in re.finditer(r"^- \*\*\d{2}:\d{2} ([^*]+?)\*\*：(.*)$", txt, re.M):
+            who, text = _who_of(m2.group(1)), m2.group(2).strip()
+            if who and text and not text.startswith("#"):
+                mine[who] = [text[:600]]          # 覆盖式 → 留下的就是最后一条
+        if not (topic or notes or mine):
+            continue
+        # ⭐ 总览也要带上（阿包 2026-10-12 定的"两份都喂"）——
+        #    这场自己生成过就用它的；没有就往前翻到更早那场。
+        sum_txt, sum_from = latest_summary(topic) if topic else ("", "")
+        return {"topic": topic, "when": d.get("ts") or "",
+                "rounds": int(d.get("rounds") or 0),
+                "notes": notes[:6000], "mine": mine, "file": d.get("file") or "",
+                "summary": sum_txt, "summary_from": sum_from}
+    return {}
+
+
+def note_idle_talk(who: str, text: str) -> None:
+    """记一条待机闲聊（阿包的、各位回的），只留最近 `_IDLE_TALK_MAX` 条。"""
+    global _idle_talk
+    t = (text or "").strip().replace("\n", " ")
+    if not t:
+        return
+    _idle_talk.append({"who": who, "text": t[:200]})
+    if len(_idle_talk) > _IDLE_TALK_MAX:
+        del _idle_talk[:-_IDLE_TALK_MAX]
+
+
+def idle_system_prompt(guest: dict, names: list, afterglow: dict = None,
+                       talk: list = None) -> str:
+    """⭐ 待机回复用的 system：**把身份钉死**（2026-10-12 补）。
+
+    阿包撞到的怪事：他在旁听席一口气点评了在座五位的二创形象，
+    Gemini 却把「克劳德」的设定（橘发抱书、腹黑、被封号）当成自己的，
+    回了句「把封号的锅扣在我头上」—— 它认错人了（日志 20261012-155252 第 560 行）。
+    原来这段 prompt 有三个毛病：
+      · 身份只有干巴巴一句「你是Gemini。」，连在场名单都没给；
+      · 没告诉它"阿包那条消息在点评好几位，只有写着你的那部分才是你"；
+      · 更糟的是那句**给开发者看的注释**「害小克当众说错了话」——
+        把别人的绰号（小克 = Claude）写进了对它说的话里，它很容易以为"小克"就是自己。
+    正式讨论那条路（`ask()`）里有完整的「身份纪律」段落，所以从没出过这种事；
+    这里把同一份纪律补上（对照实验见 `_probe/teatime-2026-10-12/`）。
+    ⚠️ 2026-10-12 晚补：光是"钉身份"还不够 —— 阿包发现**待机闲聊像什么都没发生过**：
+    刚陪他聊完 5 轮的议题、各自的立场、阿鱼每轮整理的纪要，**一个都没带进来**。
+    所以现在还要喂两样东西（都从参数来，方便自测）：
+      · `afterglow` = 刚结束那场的「余味」（议题 / 每轮纪要 / 你自己最后说的话）
+      · `talk`      = 刚才这几句闲聊，**按顺序** —— 同一批回复之间互相看得见
+        （千问刚说"克劳德腹黑？"，Gemini 那边就不会再认错人）
+    """
+    name = guest.get("name") or guest.get("who") or "?"
+    who_list = "、".join([n for n in (names or []) if n]) or f"（只有你：{name}）"
+    text = ((guest.get("persona") or f"你是{name}。") +
+            "\n\n现在是茶话会的待机时间（还没正式开场）。阿包（人类，在旁听席）跟你说话，"
+            "请直接回应他，一到三句，别写小作文。"
+            f"\n\n!! 身份纪律 !! 你是【{name}】，这场里只有这一个身份。"
+            f"现在在场的是：{who_list}。"
+            "阿包经常一口气点评好几位（提到别人的名字、外号、形象、性格、公司都很正常）——"
+            f"**只有明确写着「{name}」的那部分才是在说你**："
+            "别把别人的设定、外号、性格认领成自己的，也不要自称别人的名字。"
+            "⚠️ 别猜「谁到没到」—— 上面那份名单就是全部，别自己加减人。")
+    # ⭐ 刚聊完那一场的「余味」—— 别让她表现得像第一次见面
+    ag = afterglow or {}
+    if (ag.get("topic") or "").strip():
+        notes = (ag.get("notes") or "").strip()
+        if len(notes) > 900:                        # 只留尾巴（最近几轮）
+            notes = "…（前面略）\n" + notes[-900:]
+        summ = (ag.get("summary") or "").strip()
+        said = "\n\n".join(
+            x[:400] for x in ((ag.get("mine") or {}).get(guest.get("who")) or [])[-2:] if x)
+        text += (f"\n\n【你们刚聊完的那一场】议题：{(ag.get('topic') or '').strip()}"
+                 f"（{ag.get('when') or '刚才'}"
+                 + (f"，聊了 {ag['rounds']} 轮" if ag.get("rounds") else "") + "）")
+        # ⭐ 阿鱼的两份整理都带上（阿包 2026-10-12：「续读和结束时的闲聊给大家喂的就是这两部分」）
+        if notes:
+            text += f"\n\n**① 逐轮整理**（阿鱼每轮记的）：\n{notes}"
+        if summ:
+            text += ("\n\n**② 会议总览**（阿鱼整理的那份"
+                     + (f" · {ag.get('summary_from')}" if ag.get("summary_from") else "")
+                     + f"）：\n{summ[:1500]}")
+        if said:
+            text += f"\n\n【你在那场里最后说的话】\n{said}"
+        text += ("\n\n⚠️ 你**记得**这一场 —— 阿包是接着刚才的讨论跟你说话的："
+                 "可以直接引用刚才聊过的内容、延续你自己的立场；"
+                 "别当成第一次见面，也别重新自我介绍。")
+    rows = [t for t in (talk or []) if (t or {}).get("text")]
+    if rows:
+        text += ("\n\n【刚才这一小段闲聊】（按时间顺序，可能也有你自己说的）\n"
+                 + "\n".join(f"{t.get('who')}：{t.get('text')}" for t in rows))
+    return text
 
 
 def idle_loop(roster: list, settings: dict) -> None:
@@ -1934,9 +2360,22 @@ def idle_loop(roster: list, settings: dict) -> None:
 
     ready = live_ready()
     names = "、".join(g["name"] for g in ready) or "（空场）"
+    # ⭐ 待机也要"记得刚才那场"（阿包 2026-10-12）：先试上次落盘的余味，
+    #    没有就**从最近一场日志里捡**（双击启动器 = 重启服务，光靠内存活不过重启）
+    if not (_afterglow.get("topic") or "").strip():
+        load_afterglow()
+    if not (_afterglow.get("topic") or "").strip():
+        got = afterglow_from_logs()
+        if got:
+            _afterglow.update(got)
+            save_afterglow()
+    ag_now = (_afterglow.get("topic") or "").strip()
     say("system", f"🍵 讨论会待机中 · 在场：{names}　就绪 {len(ready)}/{settings['min_guests']} 位", "system")
     say("system", f"本次议题：{settings['topic']}", "system")
     say("system", "点上方「🍵 开场 / 换议题」挑一个就能开始；也可以直接说话，在场的会回你", "system")
+    if ag_now:
+        say("system", f"🧠 大家还记得刚聊完的那场：《{ag_now}》"
+                      f"（{_afterglow.get('when') or '刚才'}）—— 想接着那场聊，直接开口就行", "system")
 
     while True:
         if _start_event.is_set() and len(live_ready()) >= settings["min_guests"]:
@@ -1954,6 +2393,10 @@ def idle_loop(roster: list, settings: dict) -> None:
             say("system", f"🍵 这一场结束了，回到待机 —— 在场：{names}。"
                           f"可以直接说话（在场的会回你），也可以点上方「🍵 开场 / 换议题」开新的一场",
                 "system")
+            # ⭐ 这一场已经进了「余味」—— 说一句，免得他以为大家又"什么都不记得"了
+            if (_afterglow.get("topic") or "").strip():
+                say("system", f"🧠 这一场的记忆留住了：《{_afterglow['topic']}》"
+                              f"—— 接着聊刚才的话题就行，不用重新开场", "system")
             continue
         time.sleep(1.0)
         with _lock:
@@ -1966,7 +2409,12 @@ def idle_loop(roster: list, settings: dict) -> None:
         shot = item["image"]
         say("system", f"（回应阿包：「{q[:24]}」{'　＋一张图' if shot else ''}）", "system")
         shot_data = image_data_url(shot) if shot else ""
-        for g in live_ready():          # ⭐ 用最新的在场名单（休息的那位就不接话了）
+        # ⭐ 阿包这句也进"刚才的闲聊"—— 后面的人要能看见前面的人回了什么
+        note_idle_talk("阿包", q or "（一张图）")
+        # ⭐ 用最新的在场名单（休息的那位就不接话了）；名单也一并喂给模型当"身份锚"
+        ready_now = live_ready()
+        names_now = [g["name"] for g in ready_now]
+        for g in ready_now:
             try:
                 base = q or "（阿包发来一张图，想听你说说）"
                 if shot and guest_vision(g) and shot_data:
@@ -1978,17 +2426,15 @@ def idle_loop(roster: list, settings: dict) -> None:
                 else:
                     content = base
                 t = llm_call(g["base_url"], g["model"], g["key"], [
-                    {"role": "system", "content": (g.get("persona") or "") +
-                     "\n\n现在是茶话会的待机时间（还没正式开场）。阿包（人类，在旁听席）跟你说话，"
-                     "请直接回应他，一到三句，别写小作文。"
-                     "⚠️ 别猜「谁到没到」—— 在场的人由系统标在界面上，你看不到就别提这茬"
-                     "（旧文案写着「其他人还没到」，害小克当众说错了话）。"},
+                    {"role": "system", "content": idle_system_prompt(
+                        g, names_now, afterglow=_afterglow, talk=list(_idle_talk))},
                     {"role": "user", "content": content},
                 ])
             except Exception as e:
                 say("system", f"（{g['name']} 掉线了：{type(e).__name__}: {str(e)[:80]}）", "system")
                 continue
             say(g["who"], t)
+            note_idle_talk(g["name"], t)     # ⭐ 记进"刚才的闲聊"：同一批后面的那位看得见
 
 
 # ── 自测：起一个 mock 端点验证调用链路（不需要真 key）──
@@ -2048,8 +2494,216 @@ def selftest() -> int:
     check(strip_leading_tag("【GPT的发言】：内容") == "内容", "剥掉【GPT的发言】：标签")
     check(strip_leading_tag("立场：我是阿鱼") == "立场：我是阿鱼", "正常发言不动它")
 
+    # ⭐ 2026-10-12 补：她自己在开头标"第 N 轮发言"——阿包看到的那句「阿鱼的第一轮发言」
+    check(strip_self_title("# 阿鱼 · 第1轮发言\n\n**立场：**会，但…") == "**立场：**会，但…",
+          "剥掉自加的「# 阿鱼 · 第1轮发言」大标题")
+    check(strip_self_title("**千问·第2轮发言**\n正文") == "正文", "剥掉加粗版自加标题")
+    check(strip_self_title("# 立场：我认为会") == "# 立场：我认为会", "正文里的标题不误伤（没有『第N轮』）")
+    check(strip_self_title("第 3 轮的争论焦点是……") == "第 3 轮的争论焦点是……",
+          "只有『第N轮』没有『发言』也不动")
+    check(strip_self_title("我的立场…\n# 第 2 轮发言") == "我的立场…\n# 第 2 轮发言",
+          "只剥首行，正文里的标题不动")
+
     check(rough_tokens("你好世界") == 5, "token 粗估：4 个汉字 +1 = 5")
     check(rough_tokens("abcdefgh") == 3, "token 粗估：8 字符 /4 +1 = 3")
+
+    # ⭐ 2026-10-12 补：议题库「拖动排序之后再编辑」的回归测试（阿包报的 bug）。
+    #    他看到的症状：排完序点「✏️ 编辑」、题目一个字都不改，却弹「已经有同名的议题了」；
+    #    真因是拖动只挪了 DOM、界面手里那个下标还是旧的，服务端就按旧下标去改**别人那条**。
+    #    ⚠️ 这一段必须先把 ROOT 指到临时目录再测 —— 否则会**真的改写阿包的 topics.md**。
+    import shutil as _shutil
+    import tempfile as _tempfile
+    _saved_root = globals()["ROOT"]
+    _tmp = Path(_tempfile.mkdtemp(prefix="teatime-selftest-"))
+    try:
+        globals()["ROOT"] = _tmp
+        (_tmp / "topics.md").write_text(
+            "# 议题库\n\n\n---\n\n## 甲\n\n> **由谁提供**：阿包\n\n理由甲"
+            "\n\n---\n\n## 乙\n\n理由乙\n\n---\n\n## 丙\n\n理由丙\n", encoding="utf-8")
+        check([t["title"] for t in parse_topics()] == ["甲", "乙", "丙"],
+              "临时议题库解析（甲/乙/丙）")
+        check(save_topics([2, 0, 1]), "拖动排序写回（丙提到最前）")
+        check([t["title"] for t in parse_topics()] == ["丙", "甲", "乙"], "排序生效")
+        # 界面手里还是旧下标 0（=「甲」）→ 必须拦住，而且库里的内容一个字都不能动
+        ok_a, msg_a = edit_topic(0, "甲", "理由甲", "阿包", expect="甲")
+        check(not ok_a and "顺序" in msg_a, f"拖动后用旧下标编辑「甲」被拦下：{msg_a}")
+        check([t["title"] for t in parse_topics()] == ["丙", "甲", "乙"], "被拦下时议题库没被动过")
+        # ⭐ 这才是那个 bug 的"静默"版本：改个新题目 → 以前会**悄悄改掉「丙」**，
+        #    现在也必须同样被拦住（不是只靠判重偶然挡住）
+        ok_b, _ = edit_topic(0, "全新的题目", "理由", "阿包", expect="甲")
+        check(not ok_b, "拖动后用旧下标改新题目 → 也被拦下（不会静默改错条目）")
+        check([t["title"] for t in parse_topics()] == ["丙", "甲", "乙"], "库仍完好")
+        # 下标和 expect 对上才放行
+        ok_c, _ = edit_topic(1, "甲", "理由甲改", "阿包", expect="甲")
+        check(ok_c, "下标 + expect 对上 → 编辑成功")
+        check("理由甲改" in parse_topics()[1]["body"], "改的确实是「甲」")
+        # 删除同理：expect 不符宁可不删
+        check(not delete_topic(0, expect="甲"), "expect 不符 → 拒绝删除（不然删掉的是「丙」）")
+        check(delete_topic(0, expect="丙"), "expect 相符 → 删除成功")
+        check([t["title"] for t in parse_topics()] == ["甲", "乙"], "删掉的是「丙」")
+        # 兼容：不带 expect 的老调用（别的脚本 / 老页面）照旧能用
+        ok_d, _ = edit_topic(0, "甲", "理由甲", "阿包")
+        check(ok_d, "不传 expect 时行为不变（向后兼容）")
+    finally:
+        globals()["ROOT"] = _saved_root
+        _shutil.rmtree(_tmp, ignore_errors=True)
+
+    # ⭐ 2026-10-12 补：待机回复的 prompt 必须**把身份钉死**
+    #    （阿包那场：阿包一口气点评五位的二创形象，Gemini 却认领了克劳德的设定，
+    #      回了句「把封号的锅扣在我头上」—— 日志 20261012-155252 第 560 行）
+    _sysp = idle_system_prompt({"who": "gemini", "name": "Gemini", "persona": ""},
+                               ["阿鱼", "千问", "Gemini", "Claude", "GPT"])
+    check("你是Gemini。" in _sysp, "待机 prompt 仍然声明身份")
+    check("阿鱼、千问、Gemini、Claude、GPT" in _sysp, "待机 prompt 带上在场名单")
+    check("只有明确写着「Gemini」的那部分才是在说你" in _sysp, "待机 prompt 说明白「哪部分才是你」")
+    check("小克" not in _sysp, "待机 prompt 不再夹带别人的绰号（小克 = Claude）")
+
+    # ⭐ 2026-10-12 晚补：讨论散场后的「余味」——
+    #    阿包的原话：「如果讨论结束了，大家是回归讨论还没开始的等待状态，这是不对的。
+    #    明明大家刚刚已经经历过了一次很长很长的讨论了，最后的茶会闲聊却又恢复了
+    #    什么都没说过的时候。」（原来待机回复的上下文里只有阿包那一句话）
+    _saved_root2 = globals()["ROOT"]
+    _saved_ag = json.loads(json.dumps(globals()["_afterglow"], ensure_ascii=False))
+    _tmp2 = Path(_tempfile.mkdtemp(prefix="teatime-afterglow-"))
+    try:
+        globals()["ROOT"] = _tmp2
+        globals()["_afterglow"] = {"topic": "", "when": "", "rounds": 0,
+                                   "notes": "", "mine": {}, "file": ""}
+        # ① 落盘 → 读回
+        globals()["_afterglow"].update({
+            "topic": "二创社区对AI有没有额外好处", "when": "2026-10-12 16:25", "rounds": 5,
+            "notes": "### 第 5 轮\n证据纪律被反复强调", "mine": {"gemini": ["我主张反均质化抗体"]}})
+        check(save_afterglow(), "余味落盘 afterglow.json")
+        globals()["_afterglow"] = {"topic": "", "when": "", "rounds": 0,
+                                   "notes": "", "mine": {}, "file": ""}
+        load_afterglow()
+        check(globals()["_afterglow"]["rounds"] == 5
+              and "证据纪律" in globals()["_afterglow"]["notes"], "余味能读回来")
+        # ② 待机 prompt 要带上它（她自己那一份）
+        _sysp2 = idle_system_prompt({"who": "gemini", "name": "Gemini", "persona": ""},
+                                    ["阿鱼", "Gemini", "Claude"], afterglow=globals()["_afterglow"])
+        check("【你们刚聊完的那一场】" in _sysp2 and "二创社区对AI有没有额外好处" in _sysp2,
+              "待机 prompt 报出刚聊完的议题")
+        check("证据纪律被反复强调" in _sysp2, "带上了阿鱼整理的每轮纪要")
+        check("【你在那场里最后说的话】" in _sysp2 and "反均质化抗体" in _sysp2,
+              "带上她自己在那场最后说的话")
+        check("你**记得**这一场" in _sysp2, "明确告诉她『你记得这一场』")
+        _sysp3 = idle_system_prompt({"who": "claude", "name": "Claude", "persona": ""},
+                                    ["Gemini", "Claude"], afterglow=globals()["_afterglow"])
+        check("反均质化抗体" not in _sysp3, "别人的最后发言不会塞给她")
+        # ③ 同一批闲聊互相看得见 + 只留最近几条
+        globals()["_idle_talk"] = []
+        note_idle_talk("阿包", "大家聊得挺好")
+        note_idle_talk("千问", "克劳德腹黑？那可得小心她合上书本的下一秒……")
+        _sysp4 = idle_system_prompt({"who": "gemini", "name": "Gemini", "persona": ""},
+                                    ["Gemini", "千问"], talk=list(globals()["_idle_talk"]))
+        check("千问：克劳德腹黑" in _sysp4, "同一批里别人刚说的话，她看得见")
+        for i in range(9):
+            note_idle_talk("阿包", f"第{i}句" + "啊" * 300)
+        check(len(globals()["_idle_talk"]) == _IDLE_TALK_MAX, "闲聊只留最近几条")
+        check(len(globals()["_idle_talk"][-1]["text"]) == 200
+              and "第8句" in globals()["_idle_talk"][-1]["text"], "单条截到 200 字、留最新的")
+        # ④ 重启后能从最近一场日志里把"刚才那场"捡回来
+        (_tmp2 / "logs").mkdir()
+        (_tmp2 / "logs" / "20261012-155252-测试议题.md").write_text(
+            "# 测试议题\n\n"
+            "- **15:52 system**：本次议题：测试议题\n"
+            "- **15:52 system**：—— 第 1 轮 ——\n"
+            "- **15:56 阿鱼**：这是阿鱼的最后一句（阿鱼版）\n"
+            "- **15:56 Claude**：这是 Claude 的第 1 轮发言\n"
+            "- **15:57 gemini**：这是 Gemini 的最后一句：我最后说的\n"
+            "- **16:10 system**：📝 第 1 轮纪要（写入公用历史框）：\n"
+            "核心分歧：A 与 B 各执一词\n\n"
+            "- **16:25 system**：讨论结束（1 轮）\n"
+            # ⭐ 散场之后的**待机闲聊**：顶着最后一轮的轮号，但不该被当成"讨论发言"
+            "- **16:40 gemini**：散场后的闲聊，随便说说形象什么的\n"
+            # ⚠️ 末尾这两条是"会议纪要大卡片"（`say(\"ayu\", …, \"summary\")`），
+            #    以前会被逐行扫成"阿鱼最后说的话" —— 真日志里就是这么翻车的
+            "- **16:41 system**：📝 阿鱼开始整理这场讨论的会议记录……\n\n\n---\n\n"
+            "# 📝 会议纪要（阿鱼整理）\n\n# 会议纪要：测试\n", encoding="utf-8")
+        _got = afterglow_from_logs()
+        check(_got.get("topic") == "测试议题", f"从日志里认出了议题：{_got.get('topic')}")
+        check("核心分歧" in _got.get("notes", ""), "从日志里捡回了每轮纪要")
+        check((_got.get("mine", {}).get("gemini") or [""])[0].endswith("我最后说的"),
+              "按人捡回各自最后一条（小写 who 也能对上）")
+        check((_got.get("mine", {}).get("ayu") or [""])[0].endswith("（阿鱼版）"),
+              "「会议纪要大卡片」不会被当成阿鱼的发言")
+        check("会议纪要：测试" in (_got.get("summary") or ""), "从日志捡回的余味也带上了总览")
+        # ④b 续场要把"各人自己上次的发言"抽出来（带轮号）——**散场后的闲聊不算**
+        _sp = previous_speeches(_tmp2 / "logs" / "20261012-155252-测试议题.md")
+        check((_sp.get("gemini") or [("", "")])[-1][1].startswith("这是 Gemini 的最后一句"),
+              "抽出各人上次的发言（按人、带轮号）")
+        check(all("闲聊" not in t for _r, t in (_sp.get("gemini") or [])),
+              "散场后的闲聊不会被当成「上次的立场」")
+        check(any(r == 1 for r, _t in (_sp.get("gemini") or [])), "发言带着轮号（第 1 轮）")
+        # ⑤ 散场时记余味：空壳场不覆盖，真有内容的场才覆盖，且清空上一段闲聊
+        class _Empty:
+            settings = {"topic": "空壳场"}
+            notes = ""
+            by_guest = {}
+            end_round = 3
+            round_offset = 0
+        globals()["_afterglow"]["topic"] = "上一场"
+        remember_debate(_Empty())
+        check(globals()["_afterglow"]["topic"] == "上一场", "空壳场（一句没说）不会冲掉上一次的余味")
+
+        class _Real:
+            settings = {"topic": "真场"}
+            notes = "### 第 1 轮\n有内容"
+            by_guest = {"gemini": [(1, "我说了话")]}
+            end_round = 2
+            round_offset = 0
+        remember_debate(_Real())
+        check(globals()["_afterglow"]["topic"] == "真场"
+              and globals()["_afterglow"]["mine"]["gemini"] == ["我说了话"], "真有内容的场会记下余味")
+        check(globals()["_idle_talk"] == [], "散场会把上一段待机闲聊清空（闲聊重新开始）")
+
+        # ⭐⭐ 2026-10-12 晚：**阿鱼的两份整理都要喂**（续读 + 散场闲聊）
+        #     阿包原话：「阿鱼不是会整理每一轮大家的发言吗？然后最后会生成一个总览。
+        #     我想说的就是，续读和结束时的闲聊给大家喂的就是这两部分。」
+        # ⚠️ 用一个**别的议题名**（"两份测试议题"）—— 上面余味测试造的那份假日志时间戳是 155252，
+        #    比这里要造的 10:00 / 12:00 都新，混在一起会把它当成"最近一场"（真踩了一次）
+        _lg = _tmp2 / "logs"
+        (_lg / "20261012-100000-两份测试议题.md").write_text(
+            "# 讨论记录\n\n- 议题：两份测试议题\n\n"
+            "- **10:00 system**：—— 第 1 轮 ——\n"
+            "- **10:01 阿鱼**：第一轮我说了 A\n"
+            "- **10:02 system**：📝 第 1 轮纪要（写入公用历史框）：\n逐轮整理的内容-第1轮\n\n"
+            "- **10:05 system**：讨论结束（1 轮）\n\n---\n\n"
+            "# 📝 会议纪要（阿鱼整理）\n\n总览的内容：各方立场如下\n", encoding="utf-8")
+        (_lg / "20261012-120000-两份测试议题.md").write_text(
+            "# 讨论记录\n\n- 议题：两份测试议题\n\n"
+            "- **12:00 system**：—— 第 2 轮 ——\n"
+            "- **12:01 阿鱼**：第二轮我说了 B\n"
+            "- **12:02 system**：📝 第 2 轮纪要（写入公用历史框）：\n逐轮整理的内容-第2轮\n\n"
+            "- **12:05 system**：讨论结束（1 轮）\n", encoding="utf-8")
+        _rc, _rsrc, _lr, _rp = build_recap("两份测试议题")
+        check("① 逐轮整理" in _rc and "② 会议总览" in _rc, "续场前情：两份都带")
+        check("逐轮整理的内容-第2轮" in _rc, "逐轮整理取**最近一场**的")
+        check("总览的内容" in _rc, "总览往前翻到了更早那场（最近那场没生成过）")
+        check(_lr == 2, f"轮号接着最近那场往下数（第 {_lr} 轮）")
+        check("逐轮整理" in _rsrc and "会议总览" in _rsrc, f"来源说明里两份都报：{_rsrc}")
+        _sm, _smf = latest_summary("两份测试议题")
+        check("总览的内容" in _sm and bool(_smf), f"latest_summary 能拿到总览（{_smf}）")
+
+        class _T2:
+            settings = {"topic": "两份测试议题"}
+            notes = "逐轮整理的内容-第2轮"
+            by_guest = {"gemini": [(2, "我说过话")]}
+            end_round = 3
+            round_offset = 2
+        remember_debate(_T2())
+        check("总览的内容" in (globals()["_afterglow"].get("summary") or ""),
+              "散场时把总览也存进「余味」")
+        _sysp5 = idle_system_prompt({"who": "gemini", "name": "Gemini", "persona": ""},
+                                    ["Gemini"], afterglow=globals()["_afterglow"])
+        check("① 逐轮整理" in _sysp5 and "② 会议总览" in _sysp5,
+              "待机 prompt 把阿鱼的两份整理都喂了")
+    finally:
+        globals()["ROOT"] = _saved_root2
+        globals()["_afterglow"] = _saved_ag
+        globals()["_idle_talk"] = []
+        _shutil.rmtree(_tmp2, ignore_errors=True)
 
     cfg = load_settings()
     check(isinstance(cfg["rounds"], int) and cfg["rounds"] > 0, f"配置读取：rounds={cfg['rounds']}")
@@ -2260,7 +2914,8 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 payload = json.loads(self.rfile.read(n) or b"{}")
                 ok, tip = edit_topic(payload.get("index"), payload.get("title") or "",
-                                     payload.get("reason") or "", payload.get("author") or "")
+                                     payload.get("reason") or "", payload.get("author") or "",
+                                     payload.get("expect") or "")   # ⭐ 挡住下标漂移
                 if ok:
                     say("system", f"✏️ 议题已修改（正文里标了「已修改」）："
                                   f"{str(payload.get('title') or '')[:40]}{tip}", "system")
@@ -2275,15 +2930,19 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if self.path == "/topics/delete":          # ⭐ 议题一览：删除某个议题
             n = int(self.headers.get("Content-Length", 0))
-            ok = False
+            ok, tip = False, ""
             try:
                 payload = json.loads(self.rfile.read(n) or b"{}")
-                ok = delete_topic(int(payload.get("index", -1)))
-                if ok:
+                # ⭐ 带上 expect（界面上那条的题目）：拖动排序后下标会漂，
+                #    不带的话会**删掉别人那条**（见 delete_topic 的说明）
+                ok = delete_topic(int(payload.get("index", -1)), payload.get("expect") or "")
+                if not ok:
+                    tip = "没删成：列表顺序刚变过（多半是你刚拖动过）—— 关掉议题整理、重开一次再来删"
+                else:
                     say("system", "🗑 已从议题库删除一个议题（topics.md 已更新）", "system")
             except Exception:
                 ok = False
-            body = json.dumps({"ok": ok}, ensure_ascii=False).encode("utf-8")
+            body = json.dumps({"ok": ok, "msg": tip}, ensure_ascii=False).encode("utf-8")
             self.send_response(200 if ok else 400)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))

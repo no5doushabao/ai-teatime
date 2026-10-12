@@ -720,17 +720,22 @@ function attachDnD(el) {
         body: JSON.stringify({ order })
       });
       const j = await r.json();
-      libSub.textContent = j.ok ? "✅ 新顺序已保存到 topics.md"
-                                : "⚠️ 保存失败（顺序不合法？）";
-      [...libList.children].forEach((c, i) => {
-        const n = c.querySelector(".num");
-        if (n) n.textContent = (i + 1) + ".";
-      });
+      // ⭐⭐ 拖动只挪了 DOM 节点，**每条议题手里那个"下标"还是拖动前的旧值**
+      //     （dataset.index 是加载时从 /topics 拿的），编辑 / 删除的闭包攥的也是旧值。
+      //     而服务端已经按新顺序重写了 topics.md —— 两边一对不上，
+      //     排完序再点「✏️ 编辑」就是拿旧下标去改**别人那条**：
+      //       · 题目没改 → 撞上判重，弹「已经有同名的议题了」（阿包 2026-10-12 报的）；
+      //       · 题目改了 → 静默改错条目（更坏，能把别人那条的题目和理由覆盖掉）；
+      //       · 点「🗑 删除」→ 删掉别人那条。
+      //     所以这里直接**重新读一遍议题库**，把顺序和下标一起对齐
+      //     （拖动已经结束，重建列表不会打断拖动）。
+      showLib(j.ok ? "✅ 新顺序已保存到 topics.md"
+                   : "⚠️ 保存失败（顺序不合法？）—— 已重新读取议题库");
     } catch (_) { libSub.textContent = "⚠️ 保存失败（服务没响应）"; }
   };
 }
 
-function showLib() {
+function showLib(note) {
   libModal.classList.remove("hidden");
   libSub.textContent = "正在读取…";
   libList.innerHTML = "";
@@ -739,7 +744,8 @@ function showLib() {
     fetch("/history").then(r => r.json()).catch(() => ({ debates: [] }))
   ]).then(([t, h]) => {
     const debates = (h && h.debates) || [];
-    libSub.textContent = `共 ${t.topics.length} 个议题 · 已讨论 ${debates.length} 场 · 按住拖动可排序`;
+    libSub.textContent = `共 ${t.topics.length} 个议题 · 已讨论 ${debates.length} 场 · 按住拖动可排序`
+      + (note ? ` · ${note}` : "");
     t.topics.forEach(tp => {
       const mine = debates.filter(d => (d.topic || "").trim() === tp.title.trim());
       const el = document.createElement("div");
@@ -795,11 +801,14 @@ function showLib() {
         askConfirm("🗑 删除议题",
           `确定把「${tp.title}」从议题库删掉？\n\n会写回 topics.md —— 删了就没了。`,
           "删除", async () => {
-            await fetch("/topics/delete", {
+            // ⭐ 带上 expect（这条的题目）：拖动排序后界面手里的下标可能已经漂了，
+            //    不带的话服务端会照旧下标**删掉别人那条**（宁可不删，也不能删错）
+            const r = await fetch("/topics/delete", {
               method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ index: tp.index })
+              body: JSON.stringify({ index: tp.index, expect: tp.title })
             });
-            showLib();
+            const j = await r.json().catch(() => ({}));
+            showLib(j.ok ? "" : (j.msg || "⚠️ 删除失败：议题库刚变过，重开议题整理再来"));
           });
       };
       // ⭐ 「✏️ 编辑」：改题目 / 理由 / 由谁提供（复用增加议题那个弹窗）—— 阿包 2026-10-11 晚要的
@@ -840,6 +849,7 @@ document.getElementById("cfYes").onclick = async () => {
 const addModal = document.getElementById("addModal");
 let addMode = "add";        // "add" = 增加 · "edit" = 编辑
 let editIndex = null;       // 编辑模式下：改的是哪一条
+let editExpect = "";        // ⭐ 那条的题目（原样回传）—— 服务端拿它挡住"下标漂移"
 
 function setAddMode(mode) {
   addMode = mode;
@@ -860,6 +870,7 @@ function setAddMode(mode) {
 function showAdd() {
   setAddMode("add");
   editIndex = null;
+  editExpect = "";
   document.getElementById("addTitle").value = "";
   document.getElementById("addReason").value = "";
   document.getElementById("addAuthor").value = "";
@@ -874,6 +885,7 @@ function showAdd() {
 function showEdit(tp) {
   setAddMode("edit");
   editIndex = tp.index;
+  editExpect = tp.title || "";      // ⭐ 服务端靠它认人（不是靠下标）
   document.getElementById("addTitle").value = tp.title || "";
   document.getElementById("addReason").value = tp.reason || "";
   document.getElementById("addAuthor").value = tp.author || "";
@@ -892,7 +904,7 @@ async function saveAdd() {
   const editing = addMode === "edit";
   const r = await fetch(editing ? "/topics/edit" : "/topics/add", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(editing ? { index: editIndex, title, reason, author }
+    body: JSON.stringify(editing ? { index: editIndex, title, reason, author, expect: editExpect }
                                  : { title, reason, author })
   });
   const j = await r.json().catch(() => ({}));

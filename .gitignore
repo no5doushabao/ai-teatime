@@ -3,6 +3,8 @@ keys.local.json
 config.local.json
 think-budget.json
 resting.json
+# ⭐ 讨论「余味」（2026-10-12）：刚聊完那场的议题 / 纪要 / 各人发言 —— 运行时数据，不入库
+afterglow.json
 
 # ⭐ 议题库（2026-10-11）：**你自己那份是运行时数据**（界面会增删改排序），不进仓库；
 #    工程自带的默认议题在 topics.default.md —— 那个要进仓库。

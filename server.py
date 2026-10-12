@@ -32,6 +32,7 @@ import os
 import queue
 import random
 import re
+import subprocess
 import threading
 import time
 import sys
@@ -49,6 +50,48 @@ except Exception:
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
+
+# ── ⭐ 版本号（阿包 2026-10-12 定的：**0.2.0**）──────────────────────────
+#  他说「0.9 太高了，1.0 好像就是可以发布的成熟产品了吧」——阿鱼同意，而且按 semver，
+#  `0.9.x` 意味着"**API 基本冻结、只差最后一哆嗦**"，可我们还在改核心行为
+#  （比如"喂什么上下文给各位"）。`0.x` = 早期开发期，接口/行为随时会变。
+#  等这几条都满足了再打 **1.0**：
+#    ① 连着跑几场**不用修** ② config / 日志头 / afterglow 这些**格式冻住**（改就得写迁移）
+#    ③ 别人 clone 下来能**一次装成** ④ 前端有最低限度的自动检查 ⑤ 待办清空
+#  ⚠️ 每次改动较大时记得抬这个号 —— 它出现在三处：界面右上角、每场日志的文件头、`GET /state`。
+VERSION = "0.2.0"
+
+
+def _git_short() -> str:
+    """当前提交的短 hash（取不到就空着）—— 用来回答"我跑的是不是最新那次提交"。"""
+    try:
+        out = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=3)
+        return (out.stdout or "").strip() if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+BUILD = _git_short()                                   # 短 hash（没装 git / 不在仓库里就空）
+STARTED_AT = datetime.now().strftime("%Y-%m-%d %H:%M")  # 服务这次是什么时候起的
+
+
+def build_line() -> str:
+    """一行版本身份：`v0.2.0 · 提交 fa8fca8 · 2026-10-12 17:21 启动`。
+
+    日志文件头、启动播报、界面都用它 —— 一句话回答"这是哪一版、跑的是不是最新的"。
+    """
+    parts = [f"v{VERSION}"]
+    if BUILD:
+        parts.append(f"提交 {BUILD}")
+    parts.append(f"{STARTED_AT} 启动")
+    return " · ".join(parts)
+
+
+def state_payload() -> dict:
+    """`GET /state` 的返回 —— 顺带把版本身份带上（人问"跑的是哪版"时一个请求就有答案）。"""
+    return {"auto": _auto_next, "waiting": _next_waiting,
+            "version": VERSION, "started": STARTED_AT, "commit": BUILD}
 
 # ── 桌面阵容（头像/名字/组织；真接入时 model/base_url 从 config 覆盖）──
 # ⚠️ 这张表是 `who → 名字/组织` 的**显示映射**（日志、界面气泡都问它）。
@@ -99,7 +142,8 @@ def init_log(topic: str) -> Path:
         _log_path = base.with_name(f"{base.name}-{i}").with_suffix(".md")
         i += 1
     _log_path.write_text(
-        f"# 讨论记录\n\n- 开始：{datetime.now():%Y-%m-%d %H:%M}\n- 议题：{topic}\n\n",
+        f"# 讨论记录\n\n- 开始：{datetime.now():%Y-%m-%d %H:%M}\n- 议题：{topic}\n"
+        f"- 版本：{build_line()}\n\n",     # ⭐ 记下是哪一版跑的 —— 以后回看旧记录能对上当时的行为
         encoding="utf-8")
     return _log_path
 
@@ -2370,6 +2414,9 @@ def idle_loop(roster: list, settings: dict) -> None:
             _afterglow.update(got)
             save_afterglow()
     ag_now = (_afterglow.get("topic") or "").strip()
+    # ⭐ 第一行就报版本身份：界面上一眼能看出"这是哪一版、跑的是不是最新的"
+    #    （阿包 2026-10-12 定的 0.2.0 —— 之前折腾"改了没生效"就是因为没法一眼看出来）
+    say("system", f"🍵 AI 讨论会 {build_line()}", "system")
     say("system", f"🍵 讨论会待机中 · 在场：{names}　就绪 {len(ready)}/{settings['min_guests']} 位", "system")
     say("system", f"本次议题：{settings['topic']}", "system")
     say("system", "点上方「🍵 开场 / 换议题」挑一个就能开始；也可以直接说话，在场的会回你", "system")
@@ -2713,6 +2760,27 @@ def selftest() -> int:
           + (f"（{', '.join(g['name'] for g in ready)}）" if ready else "（还没填 key）"))
     check(len(roster) >= 5, "嘉宾名单至少 5 位")
 
+    # ⭐ 2026-10-12 补：版本身份（阿包定的 0.2.0）—— 界面右上角 / 每场日志文件头 / GET /state
+    #    之前折腾"改了没生效"就是因为没法一眼看出跑的是哪一版。
+    check(re.fullmatch(r"\d+\.\d+\.\d+", VERSION) is not None, f"版本号格式正确：{VERSION}")
+    _bl = build_line()
+    check(("v" + VERSION) in _bl and "启动" in _bl, f"版本身份那一行：{_bl}")
+    _st = state_payload()
+    check(_st.get("version") == VERSION and "started" in _st and "commit" in _st,
+          "GET /state 带上了 版本 / 启动时间 / 提交")
+    _idx = (Path(__file__).resolve().parent / "static" / "index.html").read_text(encoding="utf-8")
+    check("__TEATIME_VERSION__" in _idx and "verTag" in _idx,
+          "界面里有版本占位符 + 版本标签（服务端渲染时替换）")
+    _saved_root3 = globals()["ROOT"]
+    _tmp3 = Path(_tempfile.mkdtemp(prefix="teatime-ver-"))
+    try:
+        globals()["ROOT"] = _tmp3
+        _head = init_log("版本测试议题").read_text(encoding="utf-8")
+        check(f"- 版本：v{VERSION}" in _head, "新开的日志文件头写上了版本")
+    finally:
+        globals()["ROOT"] = _saved_root3
+        _shutil.rmtree(_tmp3, ignore_errors=True)
+
     srv.shutdown()
     print(f"\nSELFTEST {'OK' if bad == 0 else 'FAIL'} 通过 {ok} 项 / 失败 {bad} 项")
     return 0 if bad == 0 else 1
@@ -2850,7 +2918,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path == "/state":                  # ⭐ 界面开屏要知道现在是自动还是手动
-            body = json.dumps({"auto": _auto_next, "waiting": _next_waiting},
+            body = json.dumps(state_payload(),      # ⭐ 顺带带上版本身份（人问"哪版"时一眼看到）
                               ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -2869,9 +2937,31 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path == "/":
-            self.path = "/index.html"
+        if self.path.split("?", 1)[0] in ("/", "/index.html"):
+            return self._serve_index()
         return super().do_GET()
+
+    def _serve_index(self):
+        """⭐ 自己发界面（不再交给静态处理）：把 `__TEATIME_VERSION__` 换成真版本号 + 禁缓存。
+
+        为什么要自己发：
+          · 页面里写死一个 `PAGE_VERSION`（占位符由这里替换），JS 拿它跟 `/state` 返回的版本比 ——
+            对不上就在右上角标红「页面是旧的，Ctrl+F5」。**版本号只有一个来源**（server.py 的 VERSION）。
+          · `Cache-Control: no-store`：以前改了界面必须 Ctrl+F5、甚至得重开窗口，
+            浏览器缓存是老坑（`docs/踩过的坑.md` 第 1 条）。
+        """
+        try:
+            html = (STATIC / "index.html").read_text(encoding="utf-8")
+        except Exception:
+            self.send_error(404)
+            return
+        body = html.replace("__TEATIME_VERSION__", VERSION).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self):
         global _chosen_topic_index, _rounds_override, _auto_next

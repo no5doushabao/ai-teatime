@@ -21,6 +21,10 @@
   }
   .gname { font-weight: 700; font-size: 15px; }
   .gsub  { font-size: 11px; color: #8b8b9c; }
+  /* ⭐ 版本号（2026-10-12）：一眼看出"跑的是哪一版"；页面跟服务端版本对不上就标红 */
+  .ver   { margin-left: 7px; font-size: 11px; font-weight: 400; color: #8b8b9c;
+           border: 1px solid #3a3f4b; border-radius: 8px; padding: 0 6px; vertical-align: 2px; }
+  .ver.stale { color: #fff; background: #d9534f; border-color: #d9534f; font-weight: 700; }
   .members { display: flex; margin-left: auto; }
   .members img {
     width: 26px; height: 26px; border-radius: 50%;
@@ -375,7 +379,7 @@
 <body>
 <header>
   <div>
-    <div class="gname">🍵 AI 讨论会</div>
+    <div class="gname">🍵 AI 讨论会<span class="ver" id="verTag" title="正在读取版本…"></span></div>
     <div class="gsub">圆桌制 · 阿鱼主持 · 一轮每人一次</div>
   </div>
   <div class="members" id="members"></div>
@@ -1288,8 +1292,28 @@ autoBtn.onclick = async () => {
   });
 };
 paintAuto();
+/* ⭐ 版本号（2026-10-12，服务端是 0.2.0）：
+   `PAGE_VERSION` 由服务端渲染时替换（server.py 的 `_serve_index()`），
+   跟 `/state` 返回的版本比一下 —— 对不上说明**页面还是旧的 JS**，右上角标红提示刷新。
+   这样"改了代码没生效"就不用再猜是服务端还是页面了。 */
+const PAGE_VERSION = "__TEATIME_VERSION__";
 fetch("/state").then(r => r.json())
-  .then(s => { autoOn = !!s.auto; paintAuto(); })
+  .then(s => {
+    autoOn = !!s.auto; paintAuto();
+    const tag = document.getElementById("verTag");
+    if (!tag) return;
+    const v = s.version || "";
+    tag.textContent = v ? ("v" + v) : "";
+    tag.title = `服务端这一版：${v || "?"}`
+      + (s.started ? ` · ${s.started} 启动` : "")
+      + (s.commit ? ` · 提交 ${s.commit}` : "");
+    const known = PAGE_VERSION && PAGE_VERSION.indexOf("__TEATIME") !== 0;
+    if (v && known && v !== PAGE_VERSION) {
+      tag.classList.add("stale");
+      tag.textContent = `页面 v${PAGE_VERSION} → 服务 v${v}：按 Ctrl+F5 刷新`;
+      tag.title = "页面加载的是旧 JS —— 服务端已经更新了。按 Ctrl+F5（或重开窗口）即可。";
+    }
+  })
   .catch(() => {});
 
 /* ⭐ 往期讨论：回头看得见"到底聊出了什么"（阿包 2026-10-11 —— 

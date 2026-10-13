@@ -14,6 +14,10 @@ topics.md
 logs/
 # ⭐ 阿包发的图（2026-10-12）：运行时数据，不入库
 shots/
+# ⭐ key 的本地备份（2026-10-13）：**里面是真 key**，绝不入仓库！
+#    ⚠️ 教训：备份叫 keys.local.20261013-2237.json，**不匹配**上面那条 `keys.local.json` ——
+#       差一点点就把 key 推进 public 仓库了（check-ignore 当场验出来的）
+_backup/
 chat-log.md
 debate-history.json
 __pycache__/

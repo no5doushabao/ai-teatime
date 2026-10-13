@@ -541,7 +541,11 @@ def strip_meta_lines(body: str) -> str:
 def add_topic(title: str, reason: str, author: str) -> bool:
     """⭐ 新增议题（议题一览的「➕ 增加议题」弹窗）。
 
-    追加到末尾（位置可以之后拖动调整）。同名的直接拒绝，免得议题一览里出现两个一样的。
+    ⭐ 2026-10-14 改：**插到最前面**，不再追加到末尾 —— 阿包的原话：
+      「每次都要自己手动调整有点麻烦了。能不能把添加话题的时候，新加的那条自动变成第一条呢？」
+      开屏那个议题框默认选中**第一条**（`_chosen_topic_index` 默认 0），
+      所以插到最前 = 下次开局直接就是刚加的这条，不用再拖上去。
+      同名的直接拒绝，免得议题一览里出现两个一样的。
     """
     title = (title or "").strip()
     if not title:
@@ -554,7 +558,7 @@ def add_topic(title: str, reason: str, author: str) -> bool:
         parts.append(f"> **由谁提供**：{author.strip()}")
     if (reason or "").strip():
         parts.append(reason.strip())
-    items.append({"title": title, "body": "\n\n".join(parts)})
+    items.insert(0, {"title": title, "body": "\n\n".join(parts)})
     return write_topics(items)
 
 
@@ -2591,6 +2595,13 @@ def selftest() -> int:
         # 兼容：不带 expect 的老调用（别的脚本 / 老页面）照旧能用
         ok_d, _ = edit_topic(0, "甲", "理由甲", "阿包")
         check(ok_d, "不传 expect 时行为不变（向后兼容）")
+
+        # ⭐ 2026-10-14：新增议题要**插到最前面**（阿包：不用再手动拖到第一条）
+        check(add_topic("新加的题目", "理由", "阿包"), "新增议题")
+        _titles_now = [t["title"] for t in parse_topics()]
+        check(_titles_now[0] == "新加的题目", f"新议题排在第一：{_titles_now}")
+        check(add_topic("新加的题目", "重复的", "阿包") is False, "同名议题仍然拒绝")
+        check(len(_titles_now) == len(parse_topics()), "被拒的那次没有写进库")
     finally:
         globals()["ROOT"] = _saved_root
         _shutil.rmtree(_tmp, ignore_errors=True)

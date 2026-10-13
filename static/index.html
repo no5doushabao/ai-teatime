@@ -171,9 +171,12 @@
   .mhead { padding: 16px 20px 10px; }
   .mtitle { font-size: 17px; font-weight: 700; }
   .msub { font-size: 12px; color: #8b8b9c; margin-top: 4px; }
-  .tlist { padding: 6px 12px 4px; overflow-y: auto; }
+  /* ⭐ 议题框现在**列出全部**议题（2026-10-14 阿包要的），所以这里必须能滚：
+     flex:1 + min-height:0 是"flex 列容器里放滚动区"的标准配方（少了 min-height 会撑破弹窗） */
+  .tlist { padding: 6px 12px 4px; overflow-y: auto; flex: 1 1 auto; min-height: 0; scrollbar-width: thin; }
   .tlist::-webkit-scrollbar { width: 8px; }
   .tlist::-webkit-scrollbar-thumb { background: #33333e; border-radius: 4px; }
+  .tlist::-webkit-scrollbar-thumb:hover { background: #45454f; }
   .titem {
     display: flex; gap: 10px; padding: 11px 13px; margin: 6px 0; cursor: pointer;
     border-radius: 11px; border: 1px solid #2f2f3a; background: #26262e;
@@ -440,7 +443,7 @@
   <div class="mbox" style="max-width:600px">
     <div class="mhead">
       <div class="mtitle" id="addHead">➕ 增加议题</div>
-      <div class="msub" id="addSub">加完会出现在议题整理的末尾，顺序可以拖动调整</div>
+      <div class="msub" id="addSub">加完会排在<b>最前面</b>（议题框默认选第一条，下次开局就是它）；顺序仍可拖动调整</div>
     </div>
     <div class="abody">
       <label for="addTitle">议题题目</label>
@@ -630,7 +633,7 @@ function paintStartBtn() {
 function showModal() { modal.classList.remove("hidden"); }
 function hideModal() { modal.classList.add("hidden"); }
 
-const TOPIC_SHOW_MAX = 5;   // ⭐ 「换议题」只显示前 5 个，更多请去「议题整理」
+// ⚠️ 2026-10-14 起没有"只列前 N 个"这件事了 —— 议题框**列出全部**、容器自己滚（阿包要的）
 
 function loadTopics() {
   // ⭐ 每次都重新读（以前只在开屏读一次，所以在议题整理里拖完序，这里还是旧顺序）
@@ -640,14 +643,16 @@ function loadTopics() {
   ]).then(([d, h]) => {
     const debates = (h && h.debates) || [];
     // ⭐ 每条议题"聊过几场" —— 「继续讨论」按钮判定用。
-    //    这里按**全部**议题算（不只是列出来的前 5 条），因为默认选中项可能是第 6 条以后。
     topicDebates = {};
     d.topics.forEach(t => {
       topicDebates[t.index] = debates.filter(x => (x.topic || "").trim() === t.title.trim()).length;
     });
     topicList.innerHTML = "";
     const n = d.topics.length;
-    const shown = d.topics.slice(0, TOPIC_SHOW_MAX);
+    // ⭐⭐ 2026-10-14：**全部列出来**（以前只列前 5 个，想看第 6 条得去「议题整理」）——
+    //     阿包的原话：「我现在选议题那里加个滚动条来显示所有的议题」。
+    //     容器 .tlist 自带 overflow-y:auto，条数一多滚动条就出来了。
+    const shown = d.topics;
     canStart = d.ready >= d.min_guests;
     mSub.textContent = `共 ${n} 个议题 · 在场 ${d.ready} 位（至少 ${d.min_guests} 位可开场）`;
     mHint.textContent = canStart ? "选一个议题，阿鱼会开场主持" : `⚠️ 只有 ${d.ready} 位就绪，还差 ${d.min_guests - d.ready} 位`;
@@ -681,15 +686,16 @@ function loadTopics() {
       topicList.appendChild(el);
       if (pickedTopic === null) pickedTopic = d.current;
     });
-    // ⭐ 说明：这里只列前几个，想加/想整理去「议题整理」
+    // ⭐ 底部那句：2026-10-14 起**全部列出来了**，这句只留"想加/想整理去哪"
     const more = document.createElement("div");
     more.className = "tmore";
-    more.textContent = n > TOPIC_SHOW_MAX
-      ? `上面是前 ${TOPIC_SHOW_MAX} 个（共 ${n} 个）—— 想讨论别的、想加减或排序，点「📋 议题整理」`
-      : `想加新议题、或调整顺序？点「📋 议题整理」`;
+    more.textContent = `共 ${n} 个议题都在这儿（滚动列表看全部）—— 想加新议题、删改或调顺序，点「📋 议题整理」`;
     topicList.appendChild(more);
     paintStartBtn();               // ⭐ 开屏默认选中那条也要标对（聊过 → 「继续讨论」）
     showModal();
+    // ⭐ 全列之后，"选中那条"可能在滚动区外面 —— 自动滚到它，别让他找不到选的是哪个
+    const sel = topicList.querySelector(".titem.sel");
+    if (sel) requestAnimationFrame(() => sel.scrollIntoView({ block: "nearest" }));
   }).catch(() => { mSub.textContent = "读不到议题（服务没起来？）"; showModal(); });
 }
 
@@ -861,7 +867,7 @@ function setAddMode(mode) {
   document.getElementById("addHead").textContent = editing ? "✏️ 编辑议题" : "➕ 增加议题";
   document.getElementById("addSub").textContent = editing
     ? "改完写回 topics.md —— 这条会标上「（已修改）」"
-    : "加完会出现在议题整理的末尾，顺序可以拖动调整";
+    : "加完会排在最前面（议题框默认选第一条，下次开局就是它）；顺序仍可拖动调整";
   document.getElementById("addSave").textContent = editing ? "保存修改" : "保存";
   // ⭐ 编辑已有议题时不必再"现场提问"（那是给新议题找灵感用的）
   document.getElementById("liveAsk").style.display = editing ? "none" : "";

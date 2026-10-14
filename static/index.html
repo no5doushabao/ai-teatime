@@ -113,7 +113,20 @@
   .seat { font-size: 11px; color: #7d7d92; margin-bottom: 6px;
           display: flex; align-items: center; gap: 6px; }
   .seat .sp { flex: 1; }
-  .inputbar { display: flex; gap: 8px; }
+  .inputbar { display: flex; gap: 8px; align-items: flex-end; }
+  /* ⭐ 多行输入框（阿包 2026-10-15 要的）：以前是单行 input，长文本往右无限延伸，
+     想写「1. 2. 3.」多条观点根本没法写。现在是 textarea —— 内容多了**向上长高**
+     （最多 200px，再多就内部滚动），Enter 发送、Shift+Enter 换行。*/
+  .inputbar textarea {
+    flex: 1; padding: 10px 13px; border-radius: 10px; border: 1px solid #34343f;
+    background: #22222b; color: #eaeaf2; font-size: 14px; outline: none;
+    resize: none; overflow-y: auto; max-height: 200px;
+    line-height: 1.65; font-family: inherit;
+  }
+  .inputbar textarea:focus {
+    border-color: #4a6fa5; box-shadow: 0 0 0 2px rgba(74,111,165,.22);
+  }
+  .inputbar textarea::placeholder { color: #6c6c80; }
   /* ⭐ 发图（2026-10-12）：输入框上方的预览条 + 气泡里的图 */
   .imgprev {
     display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin-bottom: 8px;
@@ -434,7 +447,7 @@
   </div>
   <div class="inputbar">
     <button id="imgBtn" class="mini" title="发一张图 —— 也可以直接 Ctrl+V 粘贴、或把图拖进来">🖼</button>
-    <input id="msg" placeholder="说点什么…（Enter 发送；可粘贴图片）" autocomplete="off">
+    <textarea id="msg" rows="1" placeholder="说点什么…（Enter 发送 · Shift+Enter 换行 · 可直接粘贴图片）"></textarea>
     <button id="send">发送</button>
   </div>
   <input type="file" id="imgFile" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
@@ -1272,6 +1285,7 @@ async function send() {
   const t = inp.value.trim();
   if (!t && !pendingImg) return;          // ⭐ 只发图、不带字，也算一条
   inp.value = "";
+  inp.style.height = "auto";              // ⭐ 清空后把输入框收回一行高
   const img = pendingImg;
   setPendingImg("");                      // 先清预览，免得连发两次同一张
   await fetch("/say", {
@@ -1281,8 +1295,23 @@ async function send() {
   });
 }
 document.getElementById("send").onclick = send;
-document.getElementById("msg").addEventListener("keydown", e => {
-  if (e.key === "Enter") send();
+const msgBox = document.getElementById("msg");
+/* ⭐ 多行输入（阿包 2026-10-15 要的）：
+   · Enter 发送、**Shift+Enter 换行** —— 想写「1. 2. 3.」这种多条观点时，用 Shift+Enter 分行
+   · 输入框随内容**向上长高**（最多 200px，再多就内部滚动），不再是往右无限延伸的一行 */
+function autoGrow() {
+  msgBox.style.height = "auto";
+  // ⚠️ 给个下限：headless / 字体还没加载时 scrollHeight 可能是 0，
+  //    直接写上去输入框会"消失"（一行高都不到）
+  const h = Math.min(Math.max(msgBox.scrollHeight, 34), 200);
+  msgBox.style.height = h + "px";
+}
+msgBox.addEventListener("input", autoGrow);
+msgBox.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();            // 别让 textarea 自己插一个换行
+    send();
+  }
 });
 
 /* ⭐ 发图（2026-10-12 加）：三条路都能进 —— 选文件 / Ctrl+V 粘贴 / 把图拖进来。

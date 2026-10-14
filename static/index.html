@@ -132,6 +132,27 @@
     display: block; max-width: 100%; max-height: 320px; border-radius: 10px;
     margin: 2px 0 8px; cursor: zoom-in; border: 1px solid rgba(255,255,255,.14);
   }
+  /* ⭐ 发言要能**选中复制**（阿包 2026-10-15 提的）：
+     body 上那句 user-select:none 是为了拖动时不误选，但气泡正文必须能选。*/
+  .bubble, .summary, .notes, .waitbox, .sys, .tfull {
+    user-select: text; -webkit-user-select: text;
+  }
+  /* ⭐ 发言里的链接直接能点（他说"这样我也能直接确认真伪"）*/
+  .bubble a.lk {
+    color: #8fd0ff; text-decoration: underline; word-break: break-all;
+    cursor: pointer;
+  }
+  .bubble a.lk:hover { color: #cfeaff; }
+  .row.me .bubble a.lk { color: #e6f3ff; }
+  /* ⭐ 每条发言一个「复制」按钮（悬停才出现，不碍眼）*/
+  .copybtn {
+    float: right; margin-left: 8px; font-size: 11px; line-height: 1.6;
+    color: #83839a; border: 1px solid #3a3a46; border-radius: 6px;
+    padding: 0 7px; cursor: pointer; opacity: 0; transition: opacity .12s;
+    user-select: none;
+  }
+  .row:hover .copybtn { opacity: 1; }
+  .copybtn:hover { color: #dfe8f5; border-color: #4a6fa5; background: #2b3550; }
   input {
     flex: 1; padding: 10px 13px; border-radius: 10px; border: 1px solid #34343f;
     background: #22222b; color: #eaeaf2; font-size: 14px; outline: none;
@@ -587,7 +608,40 @@ let pickedTopic = null;
 let canStart = false;
 
 function esc(s) {
-  return (s || "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  // ⚠️ 2026-10-15 加上 " 和 ' —— 以前只转 &<>，够 textContent 用，
+  //    但"把发言变成可点的链接"要往 HTML **属性**里塞 URL，不转引号就能逃逸出属性。
+  return (s || "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ⭐ 把发言里的链接变成能点的（阿包 2026-10-15：「我希望大家发言里面的链接我可以直接打开，
+   这样我也能直接确认真伪」）。
+
+   ⚠️ 顺序是红线：**先转义、再链接化**。反过来写就是 XSS 直通车（发言是模型生成的，
+      它可能吐出任何东西，包括 <img onerror=…>）。
+   ⚠️ 只认 http / https —— javascript:、data: 一律不当链接。*/
+function safeUrl(u) {
+  const raw = (u || "").replace(/&amp;/g, "&");
+  try {
+    const x = new URL(raw);
+    if (x.protocol !== "http:" && x.protocol !== "https:") return "";
+    return x.href.replace(/&/g, "&amp;").replace(/"/g, "%22");
+  } catch (_) { return ""; }
+}
+
+function linkify(text) {
+  let s = esc(text || "");
+  // ① markdown 写法：[标题](https://…) —— 模型很爱这么写
+  s = s.replace(/\[([^\]\n]{1,120})\]\((https?:\/\/[^\s)]{4,500})\)/g, (m, label, url) => {
+    const u = safeUrl(url);
+    return u ? `<a class="lk" href="${u}" target="_blank" rel="noopener noreferrer">${label}</a>` : m;
+  });
+  // ② 裸链接（前面是行首/空格/括号/引号这类边界，免得把词尾巴也算进去）
+  s = s.replace(/(^|[\s（(【「>])(https?:\/\/[^\s<>"'）)】」]{4,500})/g, (m, pre, url) => {
+    const u = safeUrl(url);
+    return u ? `${pre}<a class="lk" href="${u}" target="_blank" rel="noopener noreferrer">${url}</a>` : m;
+  });
+  return s;
 }
 
 /* ── 顶栏成员头像 ── */
@@ -1075,17 +1129,22 @@ document.getElementById("askNo").onclick = () => askModal.classList.add("hidden"
 const LONG = 260;        // ⭐ 超过这个字数就折叠，免得一场讨论刷出几千行
 
 function addBubbleText(el, text) {
-  const keep = el.querySelector("img.shot");     // ⭐ 图不能被 textContent 冲掉（展开/收起要塞回来）
-  if (text.length <= LONG) { el.textContent = text; if (keep) el.appendChild(keep); return; }
-  const short = text.slice(0, LONG);
-  el.textContent = short + "…";
+  const keep = el.querySelector("img.shot");     // ⭐ 图不能被 innerHTML 冲掉（展开/收起要塞回来）
+  const full = linkify(text);                    // ⭐ 转义 + 链接化：链接在外面直接能点开
+  if ((text || "").length <= LONG) {
+    el.innerHTML = full;                         // ⚠️ 这里安全：full 已经过 esc() 转义
+    if (keep) el.appendChild(keep);
+    return;
+  }
+  const short = linkify((text || "").slice(0, LONG));
+  el.innerHTML = short + "…";
   const btn = document.createElement("span");
   btn.className = "more";
   let open = false;
   btn.textContent = `展开全文（共 ${text.length} 字）`;
   btn.onclick = () => {
     open = !open;
-    el.textContent = open ? text : short + "…";
+    el.innerHTML = open ? full : short + "…";
     if (keep) el.appendChild(keep);
     el.appendChild(btn);
     btn.textContent = open ? "收起" : `展开全文（共 ${text.length} 字）`;
@@ -1170,6 +1229,30 @@ function addMsg(m) {
     im.onclick = () => window.open(m.image, "_blank");
     bubble.appendChild(im);
   }
+  // ⭐ 「复制」按钮：悬停才出现，点一下把这条发言整段复制走
+  //    （阿包 2026-10-15：「我好像不能复制大家的发言」—— 以前 body 上那句
+  //      user-select:none 把整页都锁住了，现在既能选中、也给了一键复制）
+  const cp = document.createElement("span");
+  cp.className = "copybtn";
+  cp.textContent = "复制";
+  cp.title = "复制这条发言的全文";
+  cp.onclick = async (ev) => {
+    ev.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(m.text || "");
+      cp.textContent = "已复制 ✓";
+    } catch (_) {
+      // 剪贴板 API 不可用时退化成"帮你选中"，Ctrl+C 即可
+      const r = document.createRange();
+      r.selectNodeContents(bubble);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      cp.textContent = "已选中，Ctrl+C";
+    }
+    setTimeout(() => { cp.textContent = "复制"; }, 1600);
+  };
+  bubble.appendChild(cp);
   flow.appendChild(row);
   flow.scrollTop = flow.scrollHeight;
 

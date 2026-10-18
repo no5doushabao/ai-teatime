@@ -335,7 +335,15 @@
   }
   .ghost { background: #2a2a34; border: 1px solid #3a3a46; color: #c9c9d6; }
 
-  /* ── ⭐ 设置弹窗（2026-10-18 阿包要的）── */
+  /* ── ⭐ 参会者一览里的模型下拉（2026-10-18）── */
+.rselect { background: rgba(255,255,255,.06); color: inherit; border: 1px solid rgba(255,255,255,.16);
+  border-radius: 8px; padding: 6px 8px; font-size: 13px; min-width: 200px; max-width: 46%; }
+.rselect:focus { outline: 2px solid #7c5cff; outline-offset: 1px; }
+.rselect option { background: #24242e; color: #eee; }
+#rModelHint.warn { color: #ffb347; }
+#rModelHint { margin: -2px 0 8px; }
+
+/* ── ⭐ 设置弹窗（2026-10-18 阿包要的）── */
 .setrow { display: flex; align-items: center; gap: 14px; padding: 14px 0; border-top: 1px solid rgba(255,255,255,.07); }
 .setrow:first-child { border-top: 0; padding-top: 2px; }
 .setmain { flex: 1; min-width: 0; }
@@ -612,6 +620,12 @@
     </div>
     <div class="rgrid" id="rGrid"></div>
     <div class="rpanel hidden" id="rPanel">
+      <div class="rrow">
+        <span class="rtag">模型</span>
+        <select id="rModel" class="rselect"></select>
+        <button class="ghost" id="rModelRefresh" title="去这位嘉宾的服务器查一下现在有哪些模型（不影响正在进行的讨论）">🔄 更新模型选单</button>
+      </div>
+      <div class="rhint2" id="rModelHint"></div>
       <div class="rrow">
         <span class="rtag">思考用量</span>
         <input type="range" id="rRange" min="1000" max="16000" step="100" value="1200">
@@ -1644,7 +1658,93 @@ function rSelect(who) {
   [...rGrid.children].forEach(c => c.classList.toggle("on", c.dataset.who === who));
   rPanel.classList.remove("hidden");
   rPaint();
+  rLoadModels(who);
 }
+
+/* ⭐ 模型下拉（2026-10-18 阿包要的）：
+   · 打开参会者一览 / 点某位头像 → 拉一次 /models?who=（读上次探测的结果，不联网）
+   · 点「🔄 更新模型选单」→ POST /models 现场去问这一家（新模型出来时用这个）
+   · 换了下拉 → POST /model，**下一句发言就生效** */
+const rModel = document.getElementById("rModel");
+const rModelRefresh = document.getElementById("rModelRefresh");
+const rModelHint = document.getElementById("rModelHint");
+let rModels = {};                 // who -> {current, models, at, error}
+
+function rPaintModels() {
+  const row = rModels[rPicked] || {};
+  const cur = row.current || "";
+  const list = (row.models || []).slice();
+  const dropped = !!cur && list.length > 0 && !list.includes(cur);
+  const opts = list.includes(cur) || !cur ? list : [cur, ...list];
+  rModel.innerHTML = "";
+  if (!opts.length) {
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = "（还没查过）"; rModel.appendChild(o);
+  } else {
+    opts.forEach(m => {
+      const o = document.createElement("option");
+      o.value = m;
+      o.textContent = m + (m === cur ? "  ← 在用" : "");
+      if (m === cur) o.selected = true;
+      rModel.appendChild(o);
+    });
+  }
+  rModel.disabled = !opts.length;
+  let hint = "";
+  let warn = false;
+  if (row.error) { hint = "⚠️ 上次查询失败：" + row.error; warn = true; }
+  else if (dropped) { hint = `⚠️「${cur}」不在可用清单里 —— 可能已弃用，建议换一个`; warn = true; }
+  else if (list.length) hint = `可用 ${list.length} 个 · ${row.at || "上次"} 查的`;
+  else hint = "还没查过 —— 点「🔄 更新模型选单」去问一下这位";
+  rModelHint.textContent = hint;
+  rModelHint.classList.toggle("warn", warn);
+}
+
+async function rLoadModels(who) {
+  try {
+    const j = await (await fetch("/models?who=" + encodeURIComponent(who))).json();
+    rModels[who] = { current: j.current || "", models: j.models || [], at: j.at || "", error: j.error || "" };
+  } catch (e) {
+    rModels[who] = { current: "", models: [], at: "", error: "读取失败" };
+  }
+  if (rPicked === who) rPaintModels();
+}
+
+rModelRefresh.onclick = async () => {
+  if (!rPicked) return;
+  const who = rPicked;
+  rModelRefresh.disabled = true;
+  rModelHint.textContent = "正在去问这位的服务器…";
+  rModelHint.classList.remove("warn");
+  try {
+    const j = await (await fetch("/models", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ who })
+    })).json();
+    rModels[who] = { current: j.current || "", models: j.models || [], at: j.at || "",
+                     error: j.ok ? "" : (j.error || "查询失败") };
+    if (rPicked === who) rPaintModels();
+  } catch (e) {
+    rModels[who] = { current: "", models: [], at: "", error: "请求失败（服务在跑吗？）" };
+    if (rPicked === who) rPaintModels();
+  } finally {
+    rModelRefresh.disabled = false;
+  }
+};
+
+rModel.onchange = async () => {
+  if (!rPicked) return;
+  const who = rPicked;
+  const model = rModel.value;
+  try {
+    await fetch("/model", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ who, model })
+    });
+    if (rModels[who]) rModels[who].current = model;
+    if (rPicked === who) rPaintModels();
+  } catch (e) { /* 忽略：下拉下次打开还会回到服务端的值 */ }
+};
 
 async function openRoster() {
   rosterModal.classList.remove("hidden");

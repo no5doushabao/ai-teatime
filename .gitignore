@@ -2,6 +2,8 @@
 keys.local.json
 config.local.json
 think-budget.json
+# ⭐ 模型目录 / 当前选择（2026-10-18）：探测出来的可用模型清单 + 界面里选的那个 —— 运行时数据，不入库
+model-catalog.json
 resting.json
 # ⭐ 讨论「余味」（2026-10-12）：刚聊完那场的议题 / 纪要 / 各人发言 —— 运行时数据，不入库
 afterglow.json

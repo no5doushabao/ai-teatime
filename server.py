@@ -230,6 +230,9 @@ def load_roster() -> list:
         item["key"] = key
         item["ready"] = bool(key)
         item["resting"] = is_resting(who)      # ⭐ 界面要显示"谁在休息"
+        # ⭐ 2026-10-18：模型也带上 —— `model` 是当前用的（界面显示），`models` 是上次探测到的可选清单
+        item["model"] = model_for(item)
+        item["models"] = (_model_catalog.get(who) or {}).get("models") or []
         item["vision"] = bool(g.get("vision", True))   # ⭐ 能不能看图（千问显式关掉）
         # ⭐ config 里显式写了 api 的，记进 URL 表 —— llm_call() 照它选协议（见 _api_style）
         if (g.get("api") or "").strip():
@@ -296,6 +299,122 @@ def think_budget_for(who: str, default):
 
 
 load_think_budget()                      # 启动就读一次
+
+
+# ── ⭐ 模型选单（2026-10-18 阿包要的）──────────────────────────────────────
+#    两个触发点，都要有：
+#      ① **启动时**后台把全员查一遍（新出的模型、被弃用的模型一眼看到；不阻塞启动）
+#      ② 「参会者一览」里点「🔄 更新模型选单」，只查**当前选中的这一位**
+#         （新模型刚发布、或某家改了接口时，不用重启整个服务）
+#    目录（这位有哪些可用）和当前选择（用哪个）都存 `model-catalog.json` —— 运行时数据，不进 git。
+PROBE_TIMEOUT = 8
+# 明显不是"聊天模型"的关键词（各家 /models 会把 tts / 语音 / 向量 / 画图全列出来，噪音太大）
+_NON_CHAT_HINTS = ("tts", "audio", "realtime", "transcribe", "whisper", "embed",
+                   "dall-e", "moderation", "sora", "image", "rerank", "guard", "computer-use")
+
+_model_catalog = {}      # who -> {"models": [...], "at": "…", "error": ""}
+_model_override = {}     # who -> 现在选的模型（界面里选过才有）
+
+
+def _model_path() -> Path:
+    return ROOT / "model-catalog.json"
+
+
+def load_model_files() -> None:
+    global _model_catalog, _model_override
+    _model_catalog, _model_override = {}, {}
+    try:
+        d = json.loads(_model_path().read_text(encoding="utf-8"))
+        if isinstance(d, dict):
+            _model_catalog = d.get("catalog") or {}
+            _model_override = d.get("current") or {}
+    except Exception:
+        pass
+
+
+def save_model_files() -> bool:
+    try:
+        _model_path().write_text(json.dumps(
+            {"catalog": _model_catalog, "current": _model_override},
+            ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def model_for(guest: dict) -> str:
+    """这位现在用哪个模型：界面里选过的优先，否则用 config 里的。
+
+    ⚠️ 所有调用处都该走它，别直接读 `guest["model"]` —— 否则在界面上换了模型也不生效。
+    """
+    return _model_override.get(guest.get("who") or "") or (guest.get("model") or "")
+
+
+def _clean_model_ids(raw_ids, keep: str = "") -> list:
+    """过滤掉明显不是对话模型的（tts / 语音 / 向量 / 画图…）；当前在用的那个永远留着。"""
+    out = []
+    for i in raw_ids:
+        s = str(i or "").strip()
+        if not s:
+            continue
+        if s.startswith("models/"):          # Gemini 返回 `models/gemini-…`，调用时要用裸名
+            s = s[len("models/"):]
+        low = s.lower()
+        if any(h in low for h in _NON_CHAT_HINTS):
+            continue
+        if s not in out:
+            out.append(s)
+    if keep and keep not in out:
+        out.insert(0, keep)
+    return out
+
+
+def probe_models(who: str) -> dict:
+    """去问这一家的 `/models`，更新目录。**绝不抛异常**（失败只记 error，界面照样能用）。"""
+    g = next((x for x in load_roster() if x.get("who") == who), None)
+    if not g:
+        return {"ok": False, "error": "名单里没有这一位"}
+    if not g.get("ready"):
+        return {"ok": False, "error": "这位没有 key，查不了"}
+    base = (g.get("base_url") or "").rstrip("/")
+    cur = model_for(g)
+    hdrs = {"Authorization": "Bearer " + g["key"]}
+    try:
+        if _api_style(base) == "anthropic":
+            hdrs = {"x-api-key": g["key"], "anthropic-version": ANTHROPIC_VERSION}
+        req = urllib.request.Request(base + "/models", headers=hdrs)
+        with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        rows = data.get("data") or data.get("models") or []
+        ids = [str(m.get("id") or m.get("name") or "") for m in rows if isinstance(m, dict)]
+        models = _clean_model_ids(ids)          # ⚠️ 不把当前模型硬塞进去 —— 让界面能提示"可能已弃用"
+        if not models:
+            raise RuntimeError("返回里没有可用的对话模型")
+        _model_catalog[who] = {"models": models, "at": time.strftime("%Y-%m-%d %H:%M"), "error": ""}
+        save_model_files()
+        return {"ok": True, "models": models, "at": _model_catalog[who]["at"]}
+    except Exception as e:
+        msg = f"{type(e).__name__}: {str(e)[:120]}"
+        slot = _model_catalog.setdefault(who, {"models": [], "at": "", "error": ""})
+        slot["error"] = msg                       # ⚠️ 保留旧的 models，别因为一次失败就清空
+        slot.setdefault("models", [])
+        save_model_files()
+        return {"ok": False, "error": msg}
+
+
+def probe_all_models(delay: float = 3.0) -> None:
+    """启动时后台跑：把全员查一遍。失败静默（各家偶尔 403/超时，不值得打扰）。"""
+    time.sleep(delay)                 # 先让服务起来、界面能连上
+    for g in load_roster():
+        if not g.get("ready"):
+            continue
+        try:
+            probe_models(g["who"])
+        except Exception:
+            pass
+
+
+load_model_files()                       # 启动先读上次的目录（没网也能显示上次结果）
 
 
 # ── ⭐ 让某位嘉宾「休息」：这一场她不参与（阿包 2026-10-12 凌晨要的）──────
@@ -776,7 +895,7 @@ def ask_guest_for_topics(who: str) -> dict:
     cur = s.get("topic") or "（还没定）"
     past = [d.get("topic", "") for d in load_history().get("debates", [])]
     try:
-        text = llm_call(g["base_url"], g["model"], g["key"], [
+        text = llm_call(g["base_url"], model_for(g), g["key"], [
             {"role": "system", "content": (g.get("persona") or f"你是{g['name']}。") +
              "\n\n现在阿包（在场的人类）想请你提几个**新的讨论议题**。"
              "不要客套话、不要解释、不要总结，只给议题本身。"},
@@ -1632,13 +1751,13 @@ class RealTable:
         # ⭐ 思考用量**按人取**：在「参会者一览」里拖过的用它自己的，没拖过用 config 默认；
         #    返回 None = 那位被勾了"不限制"（llm_call 收到 None 就压根不传 max_tokens）
         mt = think_budget_for(guest["who"], s.get("max_tokens") or None)
-        text = llm_call(guest["base_url"], guest["model"], guest["key"], messages,
+        text = llm_call(guest["base_url"], model_for(guest), guest["key"], messages,
                         max_tokens=mt)
         # ⭐ 2026-10-10：推理模型（GPT-5 等）的"思考 token"会吃光 max_tokens → 返回空串。
         #    以前这种空回复不报错，界面上就成了"卡住不出声"。现在：重试一次更大预算 + 兜底提示。
         if not (text or "").strip():
             try:
-                text = llm_call(guest["base_url"], guest["model"], guest["key"], messages,
+                text = llm_call(guest["base_url"], model_for(guest), guest["key"], messages,
                                 max_tokens=(mt * 3 if mt else None))
             except Exception:
                 text = ""
@@ -1698,7 +1817,7 @@ class RealTable:
             "输出简短分条要点（不超过 200 字），不要评论、不要添加自己的观点。")
         body = "\n\n".join(f"【{m['name']}】\n{m['text']}" for m in self.round_turns)
         try:
-            note = llm_call(me["base_url"], me["model"], me["key"], [
+            note = llm_call(me["base_url"], model_for(me), me["key"], [
                 {"role": "system", "content": persona},
                 {"role": "user", "content":
                     f"【议题】{self.settings['topic']}\n\n【本轮全部发言】\n{body}\n\n"
@@ -1831,7 +1950,7 @@ class RealTable:
                          f"必须给出**可核实的来源**（机构或作者 + 标题 + 年份，有网址就贴网址）；"
                          f"给不出出处就别当事实讲，更不许编一个像真的出处。")
             try:
-                intro = llm_call(host["base_url"], host["model"], host["key"], [
+                intro = llm_call(host["base_url"], model_for(host), host["key"], [
                     {"role": "system", "content": (host.get("persona") or "") +
                      "\n\n你是这场讨论会的主持人。请用 150~300 字开场：① 宣布今晚的议题；"
                      "② 说清规则（每轮每人发言一次、要有立场和论证、必须回应他人）；"
@@ -2161,7 +2280,7 @@ def summarize_debate() -> str:
 
     say("system", "📝 阿鱼开始整理这场讨论的会议记录……", "system")
     try:
-        text = llm_call(me["base_url"], me["model"], me["key"], [
+        text = llm_call(me["base_url"], model_for(me), me["key"], [
             {"role": "system", "content":
                 "你是这场讨论会的会议记录员（阿鱼）。请把整场讨论整理成一份**结构化的会议纪要**：\n"
                 "① 议题与参与者、实际讨论了几轮；\n"
@@ -2578,7 +2697,7 @@ def idle_loop(roster: list, settings: dict) -> None:
                                       "就基于文字回应；可以直说「我看不到图，但…」。")
                 else:
                     content = base
-                t = llm_call(g["base_url"], g["model"], g["key"], [
+                t = llm_call(g["base_url"], model_for(g), g["key"], [
                     {"role": "system", "content": idle_system_prompt(
                         g, names_now, afterglow=_afterglow, talk=list(_idle_talk))},
                     {"role": "user", "content": content},
@@ -2927,6 +3046,21 @@ def selftest() -> int:
     check("中途加入" in _cn_new and "接着自己的立场" not in _cn_new and "别假装" in _cn_new,
           "续场 + 这场才加入：中途加入，不许假装参加过")
 
+    # ⭐ 2026-10-18 模型选单：清单过滤 + 覆盖优先级
+    _ids = _clean_model_ids(
+        ["gpt-5-mini", "tts-1", "whisper-1", "text-embedding-3-large", "models/gemini-flash-latest"],
+        keep="gpt-5-mini")
+    check(_ids == ["gpt-5-mini", "gemini-flash-latest"],
+          f"模型清单滤掉语音/向量噪音、去掉 models/ 前缀：{_ids}")
+    check(model_for({"who": "__nobody__", "model": "cfg-model"}) == "cfg-model",
+          "没在界面里选过 → 用 config 的模型")
+    _model_override["__nobody__"] = "picked-model"
+    try:
+        check(model_for({"who": "__nobody__", "model": "cfg-model"}) == "picked-model",
+              "界面里选过 → 用选的那个（下一句就生效）")
+    finally:
+        _model_override.pop("__nobody__", None)
+
     srv.shutdown()
     print(f"\nSELFTEST {'OK' if bad == 0 else 'FAIL'} 通过 {ok} 项 / 失败 {bad} 项")
     return 0 if bad == 0 else 1
@@ -3102,6 +3236,29 @@ class Handler(SimpleHTTPRequestHandler):
                 "auto_next_default": _auto_next_default,
                 "auto_next": _auto_next,
                 "grace": VIEWER_GRACE_SECONDS,
+            }, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/models"):        # ⭐ 模型选单：读某位的可选清单（2026-10-18）
+            q = self.path.split("?", 1)[1] if "?" in self.path else ""
+            who = ""
+            for kv in q.split("&"):
+                k, _, v = kv.partition("=")
+                if k == "who":
+                    who = urllib.parse.unquote(v)
+            g = next((x for x in load_roster() if x.get("who") == who), None)
+            row = _model_catalog.get(who) or {}
+            body = json.dumps({
+                "ok": True,
+                "who": who,
+                "current": model_for(g) if g else "",
+                "models": row.get("models") or [],
+                "at": row.get("at") or "",
+                "error": row.get("error") or "",
             }, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -3290,6 +3447,50 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"ok":true}')
             return
+        if self.path == "/models":                  # ⭐ 「🔄 更新模型选单」：现场去查这一位
+            n = int(self.headers.get("Content-Length", 0))
+            payload = {}
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                pass
+            who = str(payload.get("who") or "")
+            res = dict(probe_models(who))
+            g = next((x for x in load_roster() if x.get("who") == who), None)
+            res.update({"who": who, "current": model_for(g) if g else "",
+                        "at": (_model_catalog.get(who) or {}).get("at") or ""})
+            body = json.dumps(res, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/model":                   # ⭐ 换某位的模型（**下一句发言就生效**）
+            n = int(self.headers.get("Content-Length", 0))
+            payload = {}
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                pass
+            who = str(payload.get("who") or "")
+            model = str(payload.get("model") or "").strip()
+            g = next((x for x in load_roster() if x.get("who") == who), None)
+            if not who or g is None:
+                self.send_error(400)
+                return
+            if model:
+                _model_override[who] = model
+            else:
+                _model_override.pop(who, None)      # 空 = 回落到 config 里那个
+            save_model_files()
+            say("system", f"🔧 {g['name']} 的模型换成 `{model or '（config 默认）'}` —— 下一句发言就用它",
+                "system")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+            return
         if self.path == "/auto":                    # ⭐ 切换「⚡ 自动」
             n = int(self.headers.get("Content-Length", 0))
             payload = {}
@@ -3473,6 +3674,9 @@ def main() -> None:
             idle_loop(roster, settings)      # ⭐ 自动开场跑完，也回到待机（别让线程就这么没了）
 
     threading.Thread(target=boot, daemon=True).start()
+    # ⭐ 2026-10-18：启动时**后台**把全员模型查一遍（新模型 / 被弃用的模型一眼看到）。
+    #    延迟 3 秒 + 逐家串行 + 全程静默失败 —— 绝不拖慢启动、也不打扰阿包。
+    threading.Thread(target=probe_all_models, daemon=True).start()
 
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     mode = "真对话" if use_real else "demo"

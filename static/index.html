@@ -275,6 +275,13 @@
     filter: drop-shadow(0 1px 2px rgba(0,0,0,.6));
   }
   .rcard.resting .rsleep { display: block; }
+/* ⭐ 没配 key 的嘉宾（2026-10-18）：灰着也要列出来，不然用户以为没添加成功 */
+.rcard.unready { opacity: .42; }
+.rcard .rnokey {
+  position: absolute; top: -8px; right: -8px;
+  background: #6b4b8a; color: #e8ddff; font-size: 10px; padding: 1px 6px;
+  border-radius: 8px; white-space: nowrap;
+}
 /* ⭐ 主持人标记（2026-10-18 阿包要的）*/
 .rcard .rhost {
   position: absolute; top: -9px; left: 50%; transform: translateX(-50%);
@@ -1662,6 +1669,8 @@ document.getElementById("gSave").onclick = async () => {
       document.getElementById("gForm").classList.add("hidden");
       setHint.textContent = "已添加「" + j.name + "」—— 下一场开局上桌（头像默认问号，去参会者一览可以换）";
       loadKeys();
+      // ⭐ 2026-10-18：加完立刻刷新参会者一览（如果开着），别让人以为没加成
+      if (!rosterModal.classList.contains("hidden")) openRoster();
     } else {
       setHint.textContent = "没加成：" + (j.error || "未知原因");
     }
@@ -2019,7 +2028,8 @@ async function openRoster() {
       fetch("/think_budget").then(r => r.json()),
       fetch("/host").then(r => r.json()).catch(() => ({ who: "ayu" })),
     ]);
-    const ready = (ro.guests || []).filter(g => g.ready);   // ⭐ 只列**已连接**的
+    const all = (ro.guests || []);
+    const ready = all.filter(g => g.ready);
     hostWho = ho.who || "";                                  // ⭐ 谁是主持人（空 = 没有）
     rBudgets = tb.budgets || {};
     rResting = {};                                          // ⭐ 休息状态跟着 /roster 走
@@ -2028,21 +2038,26 @@ async function openRoster() {
     if (tb.min) rRange.min = tb.min;
     if (tb.max) rRange.max = tb.max;
     rGrid.innerHTML = "";
-    ready.forEach(g => {
+    // ⭐ 2026-10-18 改：**全部列出来**（以前只列 ready 的 —— 刚添加、还没填 key 的嘉宾就"消失"了，
+    //    阿包以为是没加成，其实只是没连上）。没 key 的灰着、标「未配 key」。
+    all.forEach(g => {
       const d = document.createElement("div");
-      d.className = "rcard" + (rResting[g.who] ? " resting" : "");
+      d.className = "rcard" + (rResting[g.who] ? " resting" : "") + (g.ready ? "" : " unready");
       d.dataset.who = g.who;
       d.innerHTML = `<img src="/avatars/${esc(g.who)}.png" alt="${esc(g.name)}">` +
                     `<span class="rsleep" title="休息中：这场不参与">😴</span>` +
                     `<span class="rhost hidden">👑 主持</span>` +
+                    (g.ready ? "" : `<span class="rnokey" title="没填 API key，这场上不了场">未配 key</span>`) +
                     `<b>${esc(g.name)}</b><i>${esc(g.org || "")}</i>`;
       d.onclick = () => rSelect(g.who);
       rGrid.appendChild(d);
     });
     rPaintCardMarks();          // ⭐ 画上 👑 主持人标记（2026-10-18）
     const nRest = ready.filter(g => rResting[g.who]).length;
-    rSub.textContent = `已连接 ${ready.length} 位` +
+    const nNoKey = all.length - ready.length;
+    rSub.textContent = `已连接 ${ready.length}/${all.length} 位` +
       (nRest ? ` · 😴 休息中 ${nRest} 位（这场上场 ${ready.length - nRest} 位）` : "") +
+      (nNoKey ? ` · ${nNoKey} 位没配 key（灰着，去「⚙ 设置」填）` : "") +
       ` · 点头像就能调它的思考用量`;
     rHint.textContent = "⚠️ 思考用量 = 它的「思考 + 发言」总预算（推理模型这两者共用一份）";
     if (ready.length) {

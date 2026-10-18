@@ -524,6 +524,14 @@ def add_guest(payload: dict) -> dict:
         return {"ok": False, "error": "昵称、接口地址、模型名 —— 这三个都得填"}
     if not (base.startswith("http://") or base.startswith("https://")):
         return {"ok": False, "error": "接口地址要以 http:// 或 https:// 开头"}
+    # ⚠️ 2026-10-18 阿包踩到的：把**浏览器里那个网页**的地址当 API 地址填了
+    #    （`https://ark.volcengine.com/region:cn-beijing/experience/gen_chat?model=…`）
+    #    API 地址是给程序用的，一般形如 `https://xxx.com/v1`，**不带 `?`、不带网页路径**。
+    if "?" in base or "/experience/" in base:
+        return {"ok": False,
+                "error": "这看起来是浏览器里的网页地址，不是 API 地址。"
+                         "API 地址一般形如 https://xxx.com/v1（不带 ? 和 /experience/ 这类网页路径）—— "
+                         "去服务商控制台的「API Key / 快速开始」页复制 Base URL"}
 
     p = ROOT / "config.local.json"
     cfg = load_json(p)

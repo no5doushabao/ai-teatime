@@ -1110,6 +1110,9 @@ def load_settings() -> dict:
         "host_persona": d.get("host_persona", ""),
         # ⭐ 默认不自动开场：双击启动器只是"支起场子"，想聊再点「🍵 开场」
         "auto_start": bool(cfg.get("auto_start", False)),
+        # ⭐ 「⚙ 设置」弹窗的两个开关（2026-10-18 加，阿包要的）—— 启动读一次，界面上随时能改
+        "auto_next_default": bool(cfg.get("auto_next_default", False)),
+        "stop_when_no_viewer": bool(cfg.get("stop_when_no_viewer", False)),
     }
 
 
@@ -1722,6 +1725,11 @@ class RealTable:
         """
         global _debating
         _debating = True
+        # ⭐ 看门狗：没人在看就收尾（只有「⚙ 设置」里打开 stop_when_no_viewer 才真的会动）
+        try:
+            threading.Thread(target=_watch_viewers, daemon=True).start()
+        except Exception:
+            pass
         try:
             self._run_inner()
         finally:
@@ -1977,6 +1985,13 @@ _last_log_path = None             # ⭐ 最近一场的日志路径（做总结�
 #    默认**手动**：每轮由阿鱼总结完就停下，等他点「▶ 开始下一轮」；
 #    点了「⚡ 自动」才像以前那样一口气跑完。
 _auto_next = False
+# ⭐ 2026-10-18「⚙ 设置」弹窗的两个开关（阿包要的）：
+#    · auto_next_default  —— 开场就直接「⚡ 自动」跑完（默认关 = 现在的手动模式）
+#    · stop_when_no_viewer —— 没人在看 90 秒就自动结束（默认关 = 窗口关了也继续跑完）
+_auto_next_default = False
+_stop_when_no_viewer = False
+_viewer_empty_since = None          # 最后一个界面断开的时间（None = 一直有人看）
+VIEWER_GRACE_SECONDS = 90           # 宽限期：刷新页面 / 手机切后台别被误判成"人走了"
 _next_round = threading.Event()   # 阿包点了「开始下一轮」→ 放行
 _next_waiting = False             # 现在是不是正卡在"等下一轮"上（界面上要显示）
 # ⭐ 现在有没有一场在跑（2026-10-12 凌晨加）：
@@ -2020,6 +2035,62 @@ def stop_requested() -> None:
        等它返回，再在下一轮/下一个人之前退出。
     """
     _stop_event.set()
+
+
+def save_setting(key: str, value) -> None:
+    """把「⚙ 设置」里的开关写回 config.local.json（没有就新建），下次启动还是这个值。
+
+    ⚠️ 只改这一个键，别的原样保留 —— 这个文件是阿包自己也会手改的。
+    """
+    p = ROOT / "config.local.json"
+    cfg = load_json(p)
+    if not isinstance(cfg, dict):
+        cfg = load_json(ROOT / "config.example.json") or {}
+    cfg[key] = value
+    p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _viewer_idle_long_enough(now: float) -> bool:
+    """⭐ 该不该因为"没人在看"而收尾（抽成纯函数是为了自测能直接验它）。
+
+    三个条件同时成立才算：开关打开、当前没有任何界面连着、且已经空了超过宽限期。
+    """
+    return bool(
+        _stop_when_no_viewer
+        and not _clients
+        and _viewer_empty_since is not None
+        and (now - _viewer_empty_since) >= VIEWER_GRACE_SECONDS
+    )
+
+
+def _watch_viewers() -> None:
+    """⭐ 没人在看 → 90 秒后自动按「结束议题」（设置里 `stop_when_no_viewer` 开着才生效）。
+
+    为什么要有宽限期：刷新页面 1~3 秒、手机切后台可能断几十秒，而一整轮要好几分钟 ——
+    判得太急会把正常操作（刷新 / 切窗口）误当成"人走了"。宽限期内有人连回来就清零计时。
+
+    判据用 `_clients`：每个打开的界面 = 一条 SSE 连接，断线在 `/stream` 的 finally 里移除
+    （另有 15 秒心跳兜底）。这条线程只在讨论进行中活着，散场就退出。
+    """
+    global _viewer_empty_since
+    while _debating and not _stop_event.is_set():
+        time.sleep(5)
+        if not _stop_when_no_viewer:
+            _viewer_empty_since = None
+            continue
+        with _lock:
+            alive = bool(_clients)
+        if alive:
+            _viewer_empty_since = None
+            continue
+        if _viewer_empty_since is None:
+            _viewer_empty_since = time.time()
+            continue
+        if _viewer_idle_long_enough(time.time()):
+            say("system", f"👋 没人在看了（界面关了 {VIEWER_GRACE_SECONDS} 秒）—— "
+                          f"这场收尾，当前这位说完就停", "system")
+            stop_requested()
+            return
 
 
 def summarize_debate() -> str:
@@ -2792,10 +2863,31 @@ def selftest() -> int:
         globals()["ROOT"] = _saved_root3
         _shutil.rmtree(_tmp3, ignore_errors=True)
 
+    # ⭐ 2026-10-18「⚙ 设置」：两个开关 + 看门狗判定
+    global _stop_when_no_viewer, _viewer_empty_since
+    _keep_flag, _keep_empty = _stop_when_no_viewer, _viewer_empty_since
+    try:
+        _now = time.time()
+        _stop_when_no_viewer = False
+        _viewer_empty_since = _now - 9999
+        check(not _viewer_idle_long_enough(_now), "开关关着 → 没人在看也不收尾")
+        _stop_when_no_viewer = True
+        _viewer_empty_since = None
+        check(not _viewer_idle_long_enough(_now), "一直有人看 → 不收尾")
+        _viewer_empty_since = _now - 10
+        check(not _viewer_idle_long_enough(_now), "才空 10 秒 → 还不收尾（防刷新页面被误判）")
+        _viewer_empty_since = _now - (VIEWER_GRACE_SECONDS + 1)
+        check(_viewer_idle_long_enough(_now), f"空了 {VIEWER_GRACE_SECONDS}+ 秒 → 该收尾")
+    finally:
+        _stop_when_no_viewer, _viewer_empty_since = _keep_flag, _keep_empty
+    check(_auto_next_default is False, "「默认自动模式」默认关（还是手动）")
+    _cfg_now = load_settings()
+    check("stop_when_no_viewer" in _cfg_now and "auto_next_default" in _cfg_now,
+          "配置里能读到两个设置项")
+
     srv.shutdown()
     print(f"\nSELFTEST {'OK' if bad == 0 else 'FAIL'} 通过 {ok} 项 / 失败 {bad} 项")
     return 0 if bad == 0 else 1
-
 
 # ── HTTP ──────────────────────────────────────────────────────
 class Handler(SimpleHTTPRequestHandler):
@@ -2937,6 +3029,20 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/settings":               # ⭐ 「⚙ 设置」弹窗读当前值（2026-10-18 加）
+            body = json.dumps({
+                "ok": True,
+                "stop_when_no_viewer": _stop_when_no_viewer,
+                "auto_next_default": _auto_next_default,
+                "auto_next": _auto_next,
+                "grace": VIEWER_GRACE_SECONDS,
+            }, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/think_budget":           # ⭐ 参会者一览：各位的思考用量
             body = json.dumps({"budgets": _think_budget,
                                "default": load_settings()["max_tokens"],
@@ -2975,7 +3081,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        global _chosen_topic_index, _rounds_override, _auto_next
+        global _chosen_topic_index, _rounds_override, _auto_next, _auto_next_default, _stop_when_no_viewer
         if self.path == "/ask_guest":               # ⭐ 现场提问：让某位在座的 AI 提议题备选
             n = int(self.headers.get("Content-Length", 0))
             try:
@@ -3086,6 +3192,33 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if self.path == "/next_round":              # ⭐ 手动模式：阿包点了「▶ 开始下一轮」
             _next_round.set()                       # 放行（等待中的那轮循环会自己醒来）
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+            return
+        if self.path == "/settings":                # ⭐ 「⚙ 设置」弹窗保存（2026-10-18 加）
+            n = int(self.headers.get("Content-Length", 0))
+            payload = {}
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                pass
+            if "stop_when_no_viewer" in payload:
+                _stop_when_no_viewer = bool(payload["stop_when_no_viewer"])
+                save_setting("stop_when_no_viewer", _stop_when_no_viewer)
+                say("system",
+                    "👀 已打开：关掉界面 90 秒后自动结束讨论（当前这位说完就收尾）"
+                    if _stop_when_no_viewer else
+                    "👀 已关闭：界面关掉后讨论会继续跑完（注意 token 还会继续花）", "system")
+            if "auto_next_default" in payload:
+                _auto_next_default = bool(payload["auto_next_default"])
+                save_setting("auto_next_default", _auto_next_default)
+                _auto_next = _auto_next_default          # 改了默认值就当场跟着变
+                say("system",
+                    "⚡ 已设为默认自动：下次开场就直接自己跑完，不用每轮点「开始下一轮」"
+                    if _auto_next_default else
+                    "⏸ 已设为默认手动：下次开场还是每轮停下等你点「开始下一轮」", "system")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -3244,6 +3377,11 @@ def main() -> None:
 
     ensure_topics()          # ⭐ 第一次运行：把工程自带的默认议题复制成"你自己的库"
     settings = load_settings()
+    # ⭐ 「⚙ 设置」两个开关的初值（2026-10-18）：config 里写了、或在弹窗里点过，都从这儿生效
+    global _auto_next, _auto_next_default, _stop_when_no_viewer
+    _auto_next_default = bool(settings.get("auto_next_default"))
+    _stop_when_no_viewer = bool(settings.get("stop_when_no_viewer"))
+    _auto_next = _auto_next_default
     roster = load_roster()
     ready = [g for g in roster if g.get("ready")]
     use_real = args.real or (not args.demo and len(ready) >= 1)

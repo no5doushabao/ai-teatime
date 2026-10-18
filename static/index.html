@@ -335,7 +335,20 @@
   }
   .ghost { background: #2a2a34; border: 1px solid #3a3a46; color: #c9c9d6; }
 
-  /* ⭐ 议题整理 */
+  /* ── ⭐ 设置弹窗（2026-10-18 阿包要的）── */
+.setrow { display: flex; align-items: center; gap: 14px; padding: 14px 0; border-top: 1px solid rgba(255,255,255,.07); }
+.setrow:first-child { border-top: 0; padding-top: 2px; }
+.setmain { flex: 1; min-width: 0; }
+.setlab { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+.switch { position: relative; flex: none; width: 46px; height: 26px; display: block; }
+.switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 1; }
+.switch > span { position: absolute; inset: 0; border-radius: 13px; background: rgba(255,255,255,.16); transition: background .18s; }
+.switch > span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .18s; }
+.switch input:checked + span { background: #7c5cff; }
+.switch input:checked + span::after { transform: translateX(20px); }
+.switch input:focus-visible + span { outline: 2px solid #7c5cff; outline-offset: 2px; }
+
+/* ⭐ 议题整理 */
   .hitem { padding: 12px 14px; margin: 7px 0; border-radius: 11px;
            border: 1px solid #2f2f3a; background: #26262e;
            cursor: grab; transition: background .12s, border-color .12s; }
@@ -425,6 +438,7 @@
 
 <div id="topicBar" class="on">
   <span>📌</span><span class="tl" id="topicText">还没选议题 —— 点「🍵 开场 / 换议题」挑一个</span>
+  <button class="mini" id="setBtn" title="讨论怎么跑：界面关了要不要停 / 默认自动还是手动">⚙ 设置</button>
   <button class="mini" id="libBtn">📋 议题整理</button>
   <button class="mini" id="rosterBtn">👥 参会者一览</button>
   <button class="mini" id="changeTopic">🍵 开场 / 换议题</button>
@@ -506,6 +520,37 @@
       <span class="hint"></span>
       <button class="ghost" id="addCancel">取消</button>
       <button id="addSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ⭐ 设置弹窗（2026-10-18 阿包要的）：两个开关，点了立即生效并写回 config.local.json -->
+<div id="setModal" class="modal hidden">
+  <div class="mbox" style="max-width:520px">
+    <div class="mhead">
+      <div class="mtitle">⚙ 设置</div>
+      <div class="msub">改完立即生效 —— 会写进 <code>config.local.json</code>，重启后还在</div>
+    </div>
+    <div class="abody">
+      <div class="setrow">
+        <div class="setmain">
+          <div class="setlab">界面关了就别算了</div>
+          <div class="tip">没人在看 <b>90 秒</b>后自动结束（当前这位说完就收尾）。
+            关掉 = 窗口关了它也继续跑完 —— 但 token 照样在花。</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setStopOnClose"><span></span></label>
+      </div>
+      <div class="setrow">
+        <div class="setmain">
+          <div class="setlab">默认自动模式</div>
+          <div class="tip">开场就直接「⚡ 自动」跑完，不用每轮点「▶ 开始下一轮」。</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutoDefault"><span></span></label>
+      </div>
+    </div>
+    <div class="mfoot">
+      <span class="hint" id="setHint"></span>
+      <button id="setClose">关闭</button>
     </div>
   </div>
 </div>
@@ -1410,6 +1455,45 @@ autoBtn.onclick = async () => {
   });
 };
 paintAuto();
+
+/* ⭐ 「⚙ 设置」弹窗（2026-10-18 阿包要的）
+   两个开关，点了**立即生效**（发 /settings），服务端顺手写回 config.local.json。
+   ⚠️ 用 onchange 而不是 onclick：键盘切（空格）也能触发。 */
+const setModal = document.getElementById("setModal");
+const setHint = document.getElementById("setHint");
+const setStopOnClose = document.getElementById("setStopOnClose");
+const setAutoDefault = document.getElementById("setAutoDefault");
+
+async function setLoad() {
+  try {
+    const j = await (await fetch("/settings")).json();
+    setStopOnClose.checked = !!j.stop_when_no_viewer;
+    setAutoDefault.checked = !!j.auto_next_default;
+  } catch (e) { setHint.textContent = "读取失败"; }
+}
+
+async function setSave(patch, label) {
+  setHint.textContent = "保存中…";
+  try {
+    await fetch("/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    });
+    setHint.textContent = "已保存" + (label ? "：" + label : "");
+    setTimeout(() => { setHint.textContent = ""; }, 1800);
+  } catch (e) { setHint.textContent = "保存失败"; }
+}
+
+document.getElementById("setBtn").onclick = () => { setLoad(); setModal.classList.remove("hidden"); };
+document.getElementById("setClose").onclick = () => setModal.classList.add("hidden");
+setStopOnClose.onchange = () => setSave(
+  { stop_when_no_viewer: setStopOnClose.checked },
+  setStopOnClose.checked ? "界面关了 90 秒后自动结束" : "界面关了也继续跑完");
+setAutoDefault.onchange = () => setSave(
+  { auto_next_default: setAutoDefault.checked },
+  setAutoDefault.checked ? "下次开场直接自动跑" : "下次开场每轮停下等你");
+
 /* ⭐ 版本号（2026-10-12，服务端是 0.2.0）：
    `PAGE_VERSION` 由服务端渲染时替换（server.py 的 `_serve_index()`），
    跟 `/state` 返回的版本比一下 —— 对不上说明**页面还是旧的 JS**，右上角标红提示刷新。

@@ -37,7 +37,26 @@ if (-not $py) {
   "❌ 没找到 Python。装一个（python.org），或用环境变量 AI_TEATIME_PYTHON 指定路径。"
   return
 }
-"✅ Python：$py"
+
+# ⚠️ 光看路径不够 —— Windows 商店那个 "python" 是个 **0 字节的占位存根**：
+#    Test-Path 过得去、Get-Command 也找得到，但一跑就 `exit 9009`、啥也不输出。
+#    （2026-10-18 在阿包这台机器上实测到的：`& python --version` → LASTEXITCODE=9009）
+#    ⇒ 这里**真的跑一次** --version 来验，别让用户装完发现双击没反应。
+$pyVer = ""
+try {
+  $pyVer = (& $py --version 2>&1 | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0 -or -not $pyVer) { throw "退出码 $LASTEXITCODE" }
+} catch {
+  "⚠️ 这个 python 跑不起来（$($_.Exception.Message)）：$py"
+  if ($py -match '\\WindowsApps\\') {
+    "   它是**微软商店的占位程序**，不是真的 Python —— 这就是「双击没反应 / 报 9009」的元凶。"
+  }
+  "   装一个真的（https://www.python.org/downloads/），或者用环境变量指定："
+  '   $env:AI_TEATIME_PYTHON = "C:\path\to\python.exe"'
+  "   然后再跑一次 .\install.ps1"
+  return
+}
+"✅ Python：$py（$pyVer）"
 
 # ── ② 准备 keys.local.json ──
 if (-not (Test-Path "$root\keys.local.json")) {

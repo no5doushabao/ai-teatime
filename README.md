@@ -52,10 +52,21 @@ cd ai-teatime
 | `.\run.ps1` | 起服务 + 开窗口 |
 | `.\run.ps1 -Stop` | 关服务 |
 | `.\run.ps1 -NoWindow` | 只起服务 |
-| `python server.py --selftest` | 自测（71 项，不需要 key） |
+| `python server.py --selftest` | 自测（86 项，不需要 key） |
 | `python server.py --demo` | 假数据模式（验证界面，不需要 key） |
 
 **环境要求**：Windows + Python 3.10+ + Chrome（窗口用的是 `chrome --app` 无边框模式）。除此之外**零依赖** —— 服务端只用 Python 标准库。
+
+**macOS / Linux**：`install.ps1` 和 `run.ps1` 是 PowerShell 脚本，那边用不了 —— 直接
+
+```bash
+python3 server.py
+```
+
+然后用浏览器打开 <http://127.0.0.1:8765> 就成（没有 `chrome --app` 那种独立窗口，功能一样）。
+**所以上面那套「一键」只对 Windows 成立。**
+
+⚠️ **Windows 上如果 `python --version` 报错或一闪就退**：多半装的是**微软商店的占位程序**（在 `WindowsApps` 目录里，是个 0 字节存根，跑起来会报 `9009`）。去 python.org 装一个真的，或者用 `AI_TEATIME_PYTHON` 指定路径。`install.ps1` 会检测这种情况并给出提示。
 
 ## 配置
 

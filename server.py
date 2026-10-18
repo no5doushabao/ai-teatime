@@ -461,6 +461,52 @@ def host_name() -> str:
 load_host()
 
 
+# ── ⭐ 在界面上填 API Key（2026-10-18 阿包要的）────────────────────────────
+#    以前要自己开 keys.local.json 手填，很多"想试一下"的人就卡在这一步。
+#    🔴 **安全边界（一个都不能破）**：
+#      · 界面**只回**「配没配 + 末四位」，**绝不把 key 明文发回浏览器**；
+#      · 日志/系统消息里也只写末四位，不写全文；
+#      · 写进 `keys.local.json`（本机文件，.gitignore 已排除）。
+def _keys_path() -> Path:
+    return ROOT / "keys.local.json"
+
+
+def load_keys() -> dict:
+    d = load_json(_keys_path())
+    return d if isinstance(d, dict) else {}
+
+
+def save_key(who: str, key: str) -> bool:
+    """写入 / 清除一位的 key。保留文件里 `_说明` 那些注释键。"""
+    if not who:
+        return False
+    d = load_keys()
+    if key:
+        d[who] = key
+    else:
+        d.pop(who, None)
+    try:
+        _keys_path().write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def keys_status() -> list:
+    """给界面看的 key 状态：**不含明文**，只有「配没配」+ 末四位。"""
+    rows = []
+    for g in load_roster():
+        k = str(g.get("key") or "")
+        rows.append({
+            "who": g.get("who") or "",
+            "name": g.get("name") or g.get("who") or "",
+            "org": g.get("org") or "",
+            "set": bool(k),
+            "tail": (k[-4:] if len(k) >= 8 else ""),
+        })
+    return rows
+
+
 # ── ⭐ 让某位嘉宾「休息」：这一场她不参与（阿包 2026-10-12 凌晨要的）──────
 #    原话：「在设定每轮的思考量那里，假如某个 ai 我先让她休息的话，增加一个按钮，
 #            点了这次讨论她就不参与」。
@@ -3306,6 +3352,15 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/keys":                   # ⭐ 各家 key 的配置状态（**不含明文**，2026-10-18）
+            body = json.dumps({"ok": True, "items": keys_status()},
+                              ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/host":                   # ⭐ 谁是主持人（2026-10-18）
             body = json.dumps({"ok": True, "who": _host_who, "name": host_name()},
                               ensure_ascii=False).encode("utf-8")
@@ -3562,6 +3617,36 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"ok":true}')
+            return
+        if self.path == "/keys":                    # ⭐ 在界面上填 / 清除某位的 key（2026-10-18）
+            n = int(self.headers.get("Content-Length", 0))
+            payload = {}
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                pass
+            who = str(payload.get("who") or "")
+            key = str(payload.get("key") or "").strip()
+            if not who:
+                self.send_error(400)
+                return
+            ok = save_key(who, key)
+            g = next((x for x in load_roster() if x.get("who") == who), None)
+            nm = (g["name"] if g else who)
+            if ok:
+                # 🔴 只说末四位，**绝不把 key 写进日志/系统消息**
+                say("system",
+                    f"🔑 已保存「{nm}」的 key（…{key[-4:]}）—— 下一场开局就能用"
+                    if key else
+                    f"🔑 已清除「{nm}」的 key —— 这位暂时不上场",
+                    "system")
+            body = json.dumps({"ok": ok, "items": keys_status()},
+                              ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if self.path == "/host":                    # ⭐ 选她当主持 / 取消主持（2026-10-18）
             n = int(self.headers.get("Content-Length", 0))

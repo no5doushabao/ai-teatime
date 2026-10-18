@@ -350,6 +350,18 @@
 #rModelHint.warn { color: #ffb347; }
 #rModelHint { margin: -2px 0 8px; }
 
+/* ── ⭐ 设置里的 API Key 列表（2026-10-18）── */
+.keyrows { display: flex; flex-direction: column; gap: 7px; margin-top: 10px; }
+.keyrow { display: flex; align-items: center; gap: 8px; }
+.keyrow .kn { width: 88px; font-size: 13px; flex: none; }
+.keyrow .ks { width: 108px; font-size: 11.5px; color: #83839a; flex: none; }
+.keyrow .ks.on { color: #7fd18b; }
+.keyrow input { flex: 1; min-width: 0; background: rgba(255,255,255,.05);
+  border: 1px solid rgba(255,255,255,.14); border-radius: 7px; padding: 5px 8px;
+  color: inherit; font-size: 12.5px; }
+.keyrow input:focus { outline: 2px solid #7c5cff; outline-offset: 1px; }
+.keyrow .kx { flex: none; }
+
 /* ── ⭐ 设置弹窗（2026-10-18 阿包要的）── */
 .setrow { display: flex; align-items: center; gap: 14px; padding: 14px 0; border-top: 1px solid rgba(255,255,255,.07); }
 .setrow:first-child { border-top: 0; padding-top: 2px; }
@@ -562,6 +574,14 @@
           <div class="tip">开场就直接「⚡ 自动」跑完，不用每轮点「▶ 开始下一轮」。</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutoDefault"><span></span></label>
+      </div>
+      <div class="setrow" style="display:block">
+        <div class="setmain">
+          <div class="setlab">API Key（只写不回显）</div>
+          <div class="tip">填了直接写进本机的 <code>keys.local.json</code>（不进 git）。已配置的只显示<b>末四位</b>。<br>
+            没 key 的嘉宾不上场；填完可以去「👥 参会者一览」点「🔄 更新模型选单」验证能不能用。</div>
+        </div>
+        <div id="keyRows" class="keyrows"></div>
       </div>
     </div>
     <div class="mfoot">
@@ -1519,6 +1539,7 @@ async function setLoad() {
     setStopOnClose.checked = !!j.stop_when_no_viewer;
     setAutoDefault.checked = !!j.auto_next_default;
   } catch (e) { setHint.textContent = "读取失败"; }
+  loadKeys();                       // ⭐ 顺带把各家 key 的配置状态拉一遍（只回末四位）
 }
 
 async function setSave(patch, label) {
@@ -1532,6 +1553,57 @@ async function setSave(patch, label) {
     setHint.textContent = "已保存" + (label ? "：" + label : "");
     setTimeout(() => { setHint.textContent = ""; }, 1800);
   } catch (e) { setHint.textContent = "保存失败"; }
+}
+
+/* ⭐ API Key（2026-10-18）：**只写不回显** —— 服务端只回「配没配 + 末四位」，
+   这里的输入框永远是空的，提交完立刻清掉。 */
+const keyRows = document.getElementById("keyRows");
+
+function paintKeys(items) {
+  keyRows.innerHTML = "";
+  (items || []).forEach(it => {
+    const row = document.createElement("div");
+    row.className = "keyrow";
+    const kn = document.createElement("span");
+    kn.className = "kn"; kn.textContent = it.name || it.who;
+    const ks = document.createElement("span");
+    ks.className = "ks" + (it.set ? " on" : "");
+    ks.textContent = it.set ? ("已配置 ·…" + (it.tail || "")) : "未配置";
+    const inp = document.createElement("input");
+    inp.type = "password";
+    inp.autocomplete = "new-password";
+    inp.placeholder = it.set ? "换一个新的（留空不动）" : "粘贴 key 后回车";
+    inp.onkeydown = (e) => {
+      if (e.key === "Enter") { e.preventDefault(); if (inp.value.trim()) keySave(it.who, inp.value.trim()); }
+    };
+    const btn = document.createElement("button");
+    btn.className = "ghost kx";
+    btn.textContent = it.set ? "清除" : "保存";
+    btn.onclick = () => keySave(it.who, it.set ? "" : inp.value.trim());
+    row.append(kn, ks, inp, btn);
+    keyRows.appendChild(row);
+  });
+  if (!(items || []).length) keyRows.textContent = "读不到嘉宾名单";
+}
+
+async function loadKeys() {
+  try {
+    const j = await (await fetch("/keys")).json();
+    paintKeys(j.items);
+  } catch (e) { keyRows.textContent = "读取失败（服务在跑吗？）"; }
+}
+
+async function keySave(who, key) {
+  setHint.textContent = "保存中…";
+  try {
+    const j = await (await fetch("/keys", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ who, key })
+    })).json();
+    paintKeys(j.items);
+    setHint.textContent = j.ok ? (key ? "已保存 —— 下一场开局就用它" : "已清除") : "保存失败";
+    setTimeout(() => { setHint.textContent = ""; }, 2000);
+  } catch (e) { setHint.textContent = "保存失败（服务在跑吗？）"; }
 }
 
 document.getElementById("setBtn").onclick = () => { setLoad(); setModal.classList.remove("hidden"); };

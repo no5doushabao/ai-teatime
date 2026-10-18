@@ -43,7 +43,12 @@ cd ai-teatime
 .\install.ps1        # 一键安装：找 Python + 准备 keys.local.json + 建桌面快捷方式
 ```
 
-然后**编辑 `keys.local.json` 填一个 API key**，双击桌面上那个「**AI 讨论会**」就能开场。
+然后**填一个 API key** —— 两种方式任选：
+
+- ⭐ **推荐**：双击桌面「**AI 讨论会**」→「⚙ 设置」→ 最下面的「**API Key**」里直接粘贴（不用碰文件，界面只显示末四位）
+- 或者编辑 `keys.local.json`
+
+填完就能开场了。
 
 （不想建快捷方式就直接 `.\run.ps1`；`.\run.ps1 -Stop` 关服务。）
 
@@ -72,7 +77,7 @@ python3 server.py
 
 | 想改什么 | 改哪 |
 |---|---|
-| **API key** | `keys.local.json` —— 保存即生效，不用重启 |
+| **API key** | 界面「⚙ 设置 → API Key」直接填（推荐），或改 `keys.local.json` —— 都是**存了即生效，不用重启** |
 | **议题** | `topics.md`（**你自己那份，不进 git**）—— 一行 `## 标题` + 正文，加一条就多一个议题；<br>想改「新装时的默认议题」→ `topics.default.md` |
 | **每位 AI 的思考用量** | 界面上「👥 参会者一览」里拖滑杆 → 存进 `think-budget.json` |
 | **嘉宾 / 模型 / 轮数 / 预算** | `config.local.json`（模板见 `config.example.json`） |

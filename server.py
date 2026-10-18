@@ -1543,6 +1543,11 @@ class RealTable:
         # ⭐ 被"请下场"的嘉宾：who -> 连续失败次数（阿包 10-11 那场：Gemini 从第 3 轮起
         #    每轮都撞 429，三次退避全落在同一个限流窗口里 → 每轮白等 70 秒，一直等到散场）
         self.sidelined = {}
+        # ⭐ 续场时**真的接上了自己上次发言**的那几位（2026-10-18）：
+        #    上一场的参与者可能和这一场不一样 —— 换了人就不该对他说"接着你的立场往前推"。
+        #    ⚠️ 不能事后用 `my_history()` 判断：本场说过话之后它就分不清"上次的"和"这场的"了，
+        #    所以要在塞 prev_speeches 的那一刻就定下来。
+        self.carried_who = set()
 
     def round_so_far(self) -> str:
         if not self.round_turns:
@@ -1568,14 +1573,7 @@ class RealTable:
         #    「阿鱼的第一轮发言」就是这么来的：续场第 6 轮，她手里只有"上次聊到第 5 轮"
         #    和一堆旧发言，就自己猜成"第 1 轮"，还在开头标了个大标题）
         cur = int(_round_no or 1)
-        if self.round_offset:
-            cont = (f"【当前轮次 · 续场】这是本议题的**第 {cur} 轮**"
-                    f"（上一次那场聊到第 {self.round_offset} 轮，本场接着往下数）。"
-                    f"你**在那场里说过的话**已经接在下面「你自己的历次发言」里 —— "
-                    f"**接着自己的立场往前推**（深化 / 修正 / 反驳别人），"
-                    f"**不要把讲过的论点从头再讲一遍**。\n\n")
-        else:
-            cont = f"【当前轮次】这是本议题的**第 {cur} 轮**。\n\n"
+        cont = continuation_note(cur, self.round_offset, guest["who"] in self.carried_who)
         # ⚠️ 顺带把"别自己写标题"说死：轮次和名字由系统在外面标，她自己写就容易写错
         sys_prompt += (f"\n\n⚠️ 别在发言开头自己加标题 ——「第 N 轮发言」「{name}的发言」"
                        f"这类字眼都不要写（轮次和名字由系统标注）。现在进行的是**第 {cur} 轮**，"
@@ -1765,11 +1763,18 @@ class RealTable:
             #    好像之前没讨论过。」真因：公用历史框是**阿鱼整理的纪要**（第三方口吻），
             #    模型不把它当"我说过的话"，于是每人从自己的立场从头再讲一遍。
             prev = s.get("prev_speeches") or {}
+            roster_who = {g["who"] for g in self.roster}
+            self.carried_who = {w for w in prev if w in roster_who}     # ⭐ 只算**这场真在座**的人
             for who, rows in prev.items():
                 self.by_guest.setdefault(who, []).extend(rows)
-            if prev:
-                say("system", f"🧷 也把各位**自己**上一次的发言接上了（{len(prev)} 位）—— "
-                              f"本轮接着自己的立场往下讲就行，不用从头再来一遍", "system")
+            if self.carried_who:
+                names = [g["name"] for g in self.roster if g["who"] in self.carried_who]
+                say("system", f"🧷 {len(names)} 位接上了自己上一次的发言（{'、'.join(names)}）—— "
+                              f"接着自己的立场往下讲就行，不用从头再来一遍", "system")
+            if len(self.carried_who) < len(self.roster):
+                fresh = [g["name"] for g in self.roster if g["who"] not in self.carried_who]
+                say("system", f"🆕 {len(fresh)} 位是**中途加入**的（{'、'.join(fresh)}）—— "
+                              f"只能读到上面的纪要，没有自己上次的发言", "system")
         self._hist_begin()             # ⭐ 记一笔：议题 / 参与者 / 计划轮数
 
         # ⭐ 第一轮谁先开口（2026-10-11 修）：**命题人优先** —— 他在桌上就让他先讲；
@@ -2885,11 +2890,46 @@ def selftest() -> int:
     check("stop_when_no_viewer" in _cfg_now and "auto_next_default" in _cfg_now,
           "配置里能读到两个设置项")
 
+    # ⭐ 2026-10-18 续场换了人：三种情况都要给对提示（这是阿包问出来的边界）
+    _cn_plain = continuation_note(3, 0, False)
+    check("第 3 轮" in _cn_plain and "续场" not in _cn_plain and "中途加入" not in _cn_plain,
+          "首场：只说「第 N 轮」，不提续场")
+    _cn_old = continuation_note(6, 5, True)
+    check("接着自己的立场" in _cn_old and "中途加入" not in _cn_old,
+          "续场 + 上一场在座：让他接着自己的立场")
+    _cn_new = continuation_note(6, 5, False)
+    check("中途加入" in _cn_new and "接着自己的立场" not in _cn_new and "别假装" in _cn_new,
+          "续场 + 这场才加入：中途加入，不许假装参加过")
+
     srv.shutdown()
     print(f"\nSELFTEST {'OK' if bad == 0 else 'FAIL'} 通过 {ok} 项 / 失败 {bad} 项")
     return 0 if bad == 0 else 1
 
 # ── HTTP ──────────────────────────────────────────────────────
+def continuation_note(cur: int, round_offset: int, carried: bool) -> str:
+    """⭐ 每次发言开头那句「现在第几轮 / 你是不是续场」—— 抽成纯函数是为了能自测。
+
+    · 不是续场 → 普通第 N 轮
+    · 续场 + 他上一场在座（`carried`）→ 让他接着**自己的**立场往前推
+    · 续场 + 他这次才加入 → ⚠️ 千万别对他说"接着你的立场"：
+      他上一场根本不在，这么说会让他凭空认领一个没提过的立场，
+      或者把公用历史框里别人的观点当成自己说过的话。
+    """
+    if not round_offset:
+        return f"【当前轮次】这是本议题的**第 {cur} 轮**。\n\n"
+    if carried:
+        return (f"【当前轮次 · 续场】这是本议题的**第 {cur} 轮**"
+                f"（上一次那场聊到第 {round_offset} 轮，本场接着往下数）。"
+                f"你**在那场里说过的话**已经接在下面「你自己的历次发言」里 —— "
+                f"**接着自己的立场往前推**（深化 / 修正 / 反驳别人），"
+                f"**不要把讲过的论点从头再讲一遍**。\n\n")
+    return (f"【当前轮次 · 中途加入】这是本议题的**第 {cur} 轮**"
+            f"（上一次那场聊到第 {round_offset} 轮，本场接着往下数）。"
+            f"你**没有参加**前面那些轮次 —— 上面公用历史框里是别人聊下来的纪要。"
+            f"请读完纪要再开口：可以**接着前面的人往下推**（赞同 / 反驳都行），"
+            f"但**别假装自己参加过前面的轮次**，也别重讲纪要里已经说过的论点。\n\n")
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=str(STATIC), **kw)

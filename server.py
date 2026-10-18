@@ -98,16 +98,21 @@ def state_payload() -> dict:
 #    config 里加人时这里也得加一条 —— 漏了不会报错，只会**悄悄回落成小写的 who、
 #    组织空着**：2026-10-12 的日志里 gemini 那条就写着 `**16:35 gemini**` 而不是
 #    `Gemini`（它一直没在这张表里），排查身份问题时白绕了一圈。
-GUESTS = [
-    ("ayu",    "阿鱼",     "DeepSeek"),
-    ("grok",   "Grok",     "xAI"),
-    ("qwen",   "千问",     "通义千问"),
-    ("glm",    "智谱",     "GLM"),
-    ("sf",     "小流",     "硅基流动"),
-    ("gemini", "Gemini",   "Google"),
-    ("claude", "Claude",   "Anthropic"),
-    ("gpt",    "GPT",      "OpenAI"),
+# ⭐ 2026-10-18 改：**显示名以 config 为准**（阿包把名字做成了昵称：小千大小姐 / 基米奈 / 克劳德 / 大白龙，
+#    下面那行从公司名换成模型本名）。以前这张表硬编码在这儿，config 加人就得改两处；
+#    现在 `main()` 启动时用 `_guests_display()` 从 config 重算，读不到才用下面这份兜底。
+_GUESTS_FALLBACK = [
+    ("ayu",    "阿鱼",       "DeepSeek"),
+    ("grok",   "Grok",       "xAI"),
+    ("qwen",   "小千大小姐",  "Qwen"),
+    ("glm",    "智谱",       "GLM"),
+    ("sf",     "小流",       "硅基流动"),
+    ("gemini", "基米奈",      "Gemini"),
+    ("claude", "克劳德",      "Claude"),
+    ("gpt",    "大白龙",      "GPT"),
 ]
+# 兼容旧代码（模块导入/自测时先拿到这份；main() 会用 config 覆盖）
+GUESTS = [tuple(r) for r in _GUESTS_FALLBACK]
 
 _clients = []          # 每个 SSE 连接的 queue
 _lock = threading.Lock()
@@ -163,9 +168,29 @@ def load_json(path: Path) -> dict:
         return {}
 
 
+def _guests_display() -> list:
+    """⭐ who → (显示名, 组织/模型本名)，**以 config 为准**（2026-10-18 改）。
+
+    以前这张表硬编码在模块顶部，config 里加人就得改两处（2026-10-12 踩过：gemini 漏了，
+    日志里显示成小写 who）。现在优先读 config 的 `guests[].name/org`，读不到再用内置兜底。
+    """
+    try:
+        cfg = load_json(ROOT / "config.local.json") or load_json(ROOT / "config.example.json") or {}
+        rows = []
+        for g in cfg.get("guests", []) or []:
+            who = str(g.get("who") or "").strip()
+            if not who:
+                continue
+            rows.append((who, str(g.get("name") or who).strip(), str(g.get("org") or "").strip()))
+        if rows:
+            return rows
+    except Exception as e:
+        print(f"⚠️ 显示名读 config 失败，用内置兜底：{e}")
+    return [tuple(r) for r in _GUESTS_FALLBACK]
+
+
 def dsh_credentials() -> dict:
     """读 DSH 自己的凭据文件（`~/.dsh/.credentials.yaml`）—— 插件也是这么读的。
-
     ⚠️ 只解析需要的键；**绝不打印内容**（key 不进日志、更不进对话）。
     """
     path = Path.home() / ".dsh" / ".credentials.yaml"
@@ -1059,6 +1084,7 @@ def read_past_debate(fname: str, mode: str = "summary") -> str:
 #   现在两头对齐：① 开场白照实说第一位是谁 ② 命题人真在桌上，就让他先发言。
 _NAME_ALIAS = {
     "克劳德": "claude", "claude": "claude",
+    "小千大小姐": "qwen", "基米奈": "gemini", "大白龙": "gpt",   # ⭐ 2026-10-18 的新昵称
     "通义千问": "qwen", "通义": "qwen", "千问": "qwen",
     "智谱清言": "glm", "智谱": "glm",
     "阿鱼": "ayu", "grok": "grok", "gemini": "gemini", "gpt": "gpt",
@@ -3418,10 +3444,12 @@ def main() -> None:
     ensure_topics()          # ⭐ 第一次运行：把工程自带的默认议题复制成"你自己的库"
     settings = load_settings()
     # ⭐ 「⚙ 设置」两个开关的初值（2026-10-18）：config 里写了、或在弹窗里点过，都从这儿生效
-    global _auto_next, _auto_next_default, _stop_when_no_viewer
+    global _auto_next, _auto_next_default, _stop_when_no_viewer, GUESTS
     _auto_next_default = bool(settings.get("auto_next_default"))
     _stop_when_no_viewer = bool(settings.get("stop_when_no_viewer"))
     _auto_next = _auto_next_default
+    # ⭐ 显示名以 config 为准（昵称 + 模型本名，2026-10-18）
+    GUESTS = _guests_display()
     roster = load_roster()
     ready = [g for g in roster if g.get("ready")]
     use_real = args.real or (not args.demo and len(ready) >= 1)

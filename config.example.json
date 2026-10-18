@@ -64,8 +64,8 @@
     },
     {
       "who": "qwen",
-      "name": "千问",
-      "org": "通义千问",
+      "name": "小千大小姐",
+      "org": "Qwen",
       "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
       "_note": "⭐ 国际站（阿包在 alibabacloud.com 注册的）。国内站 dashscope.aliyuncs.com 要 +86 手机验证，他在日本收不到短信 → 用不了",
       "model": "qwen-plus",
@@ -103,8 +103,8 @@
     },
     {
       "who": "gemini",
-      "name": "Gemini",
-      "org": "Google",
+      "name": "基米奈",
+      "org": "Gemini",
       "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
       "_note": "⭐ Google 的 OpenAI 兼容端点（v1beta/openai）。key 在 aistudio.google.com/app/apikey 拿。⚠️ 模型名要用 latest 别名：实测 gemini-2.5-flash / gemini-2.0-flash 都是 404，只有 gemini-flash-latest 能用（pro 版返回 429，免费额度不含）",
       "model": "gemini-flash-latest",
@@ -129,8 +129,8 @@
     },
     {
       "who": "claude",
-      "name": "Claude",
-      "org": "Anthropic",
+      "name": "克劳德",
+      "org": "Claude",
       "base_url": "https://api.anthropic.com/v1",
       "_note": "⭐ Anthropic 官方端点**不是** OpenAI 兼容的（走 /messages + x-api-key + anthropic-version，system 还得放顶层）——代码里有一条专门的协议分支，base_url 含 anthropic.com 就自动走它。模型名（2026-10 现行）：claude-fable-5-1（最强最贵）/ claude-opus-5-5 / **claude-sonnet-5-5（速度+智能，推荐）** / claude-haiku-5-5（最便宜）；旧的 claude-sonnet-4-5 已弃用。⚠️ 这些模型带自适应思考，思考 token 与正文**共用 max_tokens** —— 在「参会者一览」里给它调到 8000 左右。",
       "model": "claude-sonnet-5-5",
@@ -142,8 +142,8 @@
     },
     {
       "who": "gpt",
-      "name": "GPT",
-      "org": "OpenAI",
+      "name": "大白龙",
+      "org": "GPT",
       "base_url": "https://api.openai.com/v1",
       "model": "gpt-5-mini",
       "key_names": [

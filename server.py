@@ -522,16 +522,9 @@ def add_guest(payload: dict) -> dict:
     key = str(payload.get("key") or "").strip()
     if not name or not base or not model:
         return {"ok": False, "error": "昵称、接口地址、模型名 —— 这三个都得填"}
-    if not (base.startswith("http://") or base.startswith("https://")):
-        return {"ok": False, "error": "接口地址要以 http:// 或 https:// 开头"}
-    # ⚠️ 2026-10-18 阿包踩到的：把**浏览器里那个网页**的地址当 API 地址填了
-    #    （`https://ark.volcengine.com/region:cn-beijing/experience/gen_chat?model=…`）
-    #    API 地址是给程序用的，一般形如 `https://xxx.com/v1`，**不带 `?`、不带网页路径**。
-    if "?" in base or "/experience/" in base:
-        return {"ok": False,
-                "error": "这看起来是浏览器里的网页地址，不是 API 地址。"
-                         "API 地址一般形如 https://xxx.com/v1（不带 ? 和 /experience/ 这类网页路径）—— "
-                         "去服务商控制台的「API Key / 快速开始」页复制 Base URL"}
+    bad = _check_base_url(base)              # ⚠️ 网页地址当 API 地址的拦截在这儿（2026-10-18）
+    if bad:
+        return {"ok": False, "error": bad}
 
     p = ROOT / "config.local.json"
     cfg = load_json(p)
@@ -566,6 +559,100 @@ def add_guest(payload: dict) -> dict:
     if key:
         save_key(who, key)
     return {"ok": True, "who": who, "name": name}
+
+
+def _check_base_url(base: str) -> str:
+    """⭐ 接口地址的体检（2026-10-18）：返回错误文案，空串 = 通过。
+
+    ⚠️ 阿包当场踩过的：把**浏览器里那个网页**的地址填进来了
+    （`https://ark.volcengine.com/region:cn-beijing/experience/gen_chat?model=…`）。
+    API 地址是给程序调的，一般形如 `https://xxx.com/v1`，**不带 `?`、不带网页路径**。
+    """
+    if not base:
+        return "接口地址不能为空"
+    if not (base.startswith("http://") or base.startswith("https://")):
+        return "接口地址要以 http:// 或 https:// 开头"
+    if "?" in base or "/experience/" in base:
+        return ("这看起来是浏览器里的网页地址，不是 API 地址。"
+                "API 地址一般形如 https://xxx.com/v1（不带 ? 和 /experience/ 这类网页路径）—— "
+                "去服务商控制台的「API Key / 快速开始」页复制 Base URL")
+    return ""
+
+
+def edit_guest(payload: dict) -> dict:
+    """改一位嘉宾（**who 不改** —— 它同时是头像文件名和 key 的键，改了会断链）。"""
+    who = str(payload.get("who") or "").strip()
+    if not who:
+        return {"ok": False, "error": "没有 who"}
+    p = ROOT / "config.local.json"
+    cfg = load_json(p)
+    if not isinstance(cfg, dict):
+        cfg = load_json(ROOT / "config.example.json") or {}
+    guests = list(cfg.get("guests") or [])
+    idx = next((i for i, g in enumerate(guests) if str(g.get("who") or "") == who), None)
+    if idx is None:
+        return {"ok": False, "error": f"名单里没有「{who}」"}
+    g = dict(guests[idx])
+    for k in ("name", "org", "base_url", "model"):
+        if k not in payload:
+            continue
+        v = str(payload.get(k) or "").strip()
+        if k == "base_url":
+            bad = _check_base_url(v)
+            if bad:
+                return {"ok": False, "error": bad}
+        elif not v:
+            return {"ok": False, "error": "昵称 / 模型名不能清空"}
+        g[k] = v.rstrip("/") if k == "base_url" else v
+    guests[idx] = g
+    cfg["guests"] = guests
+    try:
+        p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        return {"ok": False, "error": f"写 config.local.json 失败：{e}"}
+    return {"ok": True, "who": who, "name": g.get("name") or who}
+
+
+def del_guest(who: str) -> dict:
+    """删一位嘉宾。顺手清掉它的 key 和用户上传的头像；**删到主持人头上会顺带清空主持人**。"""
+    global _host_who
+    who = str(who or "").strip()
+    if not who:
+        return {"ok": False, "error": "没有 who"}
+    p = ROOT / "config.local.json"
+    cfg = load_json(p)
+    if not isinstance(cfg, dict):
+        cfg = load_json(ROOT / "config.example.json") or {}
+    guests = list(cfg.get("guests") or [])
+    gone = [g for g in guests if str(g.get("who") or "") == who]
+    if not gone:
+        return {"ok": False, "error": f"名单里没有「{who}」"}
+    if len(guests) <= 1:
+        return {"ok": False, "error": "至少得留一位嘉宾"}
+    cfg["guests"] = [g for g in guests if str(g.get("who") or "") != who]
+    try:
+        p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        return {"ok": False, "error": f"写 config.local.json 失败：{e}"}
+    name = gone[0].get("name") or who
+    # 清理残留（不清也无害，但留着会让"重新加一位同名"莫名带上旧数据）
+    try:
+        if who in load_keys():
+            save_key(who, "")
+    except Exception:
+        pass
+    try:
+        av = ROOT / "avatars-user" / f"{who}.png"
+        if av.is_file():
+            av.unlink()
+    except Exception:
+        pass
+    host_cleared = False
+    if _host_who == who:                     # ⚠️ 别把主持人删没了还不说
+        _host_who = ""
+        save_host("")
+        host_cleared = True
+    return {"ok": True, "who": who, "name": name, "host_cleared": host_cleared}
 
 
 def save_avatar(who: str, data_url: str) -> dict:
@@ -3741,6 +3828,43 @@ class Handler(SimpleHTTPRequestHandler):
             res = add_guest(payload)
             if res.get("ok"):
                 say("system", f"➕ 新嘉宾加入：「{res['name']}」—— 下一场开局就能上桌", "system")
+            body = json.dumps(res, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/guest/edit":              # ⭐ 编辑一位嘉宾（2026-10-18）
+            n = int(self.headers.get("Content-Length", 0))
+            payload = {}
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                pass
+            res = edit_guest(payload)
+            if res.get("ok"):
+                say("system", f"✏️ 已更新「{res['name']}」的资料 —— 下一场开局用新的", "system")
+            body = json.dumps(res, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/guest/del":               # ⭐ 删掉一位嘉宾（2026-10-18）
+            n = int(self.headers.get("Content-Length", 0))
+            payload = {}
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                pass
+            res = del_guest(str(payload.get("who") or ""))
+            if res.get("ok"):
+                msg = f"🗑 已把「{res['name']}」从名单里移除"
+                if res.get("host_cleared"):
+                    msg += "（它原来是主持人，现在本场没有主持人了 —— 下次开场会提示）"
+                say("system", msg, "system")
             body = json.dumps(res, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")

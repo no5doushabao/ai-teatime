@@ -622,6 +622,32 @@
   </div>
 </div>
 
+<!-- ⭐ 编辑嘉宾（2026-10-18）-->
+<div id="egModal" class="modal top hidden">
+  <div class="mbox" style="max-width:600px">
+    <div class="mhead">
+      <div class="mtitle" id="egTitle">✏️ 编辑嘉宾</div>
+      <div class="msub">改完<b>下一场开局</b>生效。⚠️ 接口地址要填 <b>API 地址</b>（形如 <code>https://xxx.com/v1</code>），
+        不是浏览器里那个网页的地址。</div>
+    </div>
+    <div class="abody">
+      <div class="gform">
+        <div class="grow"><label for="egName">昵称</label><input id="egName" autocomplete="off"></div>
+        <div class="grow"><label for="egBase">接口地址</label><input id="egBase" autocomplete="off"></div>
+        <div class="grow"><label for="egModel">模型名</label><input id="egModel" autocomplete="off"></div>
+        <div class="grow"><label for="egOrg">小字（可选）</label><input id="egOrg" autocomplete="off"></div>
+        <div class="grow"><label for="egKey">换 key（留空不改）</label><input id="egKey" type="password" placeholder="留空 = 不动原来的" autocomplete="new-password"></div>
+      </div>
+      <div class="errtxt" id="egErr"></div>
+    </div>
+    <div class="mfoot">
+      <span class="hint"></span>
+      <button class="ghost" id="egCancel">取消</button>
+      <button id="egSave">保存</button>
+    </div>
+  </div>
+</div>
+
 <!-- ⭐ 通用确认框（删除议题这种危险操作要问一句）-->
 <div id="cfModal" class="modal top hidden">
   <div class="mbox" style="max-width:440px">
@@ -707,6 +733,12 @@
         <button class="ghost" id="rAvatar">🖼 换头像</button>
         <span class="rhint2" id="rAvatarHint"></span>
         <input type="file" id="rAvatarFile" accept="image/*" hidden>
+      </div>
+      <div class="rrow rrestrow">
+        <span class="rtag">这位嘉宾</span>
+        <button class="ghost" id="rEdit">✏️ 编辑资料</button>
+        <button class="ghost" id="rDel">🗑 删除</button>
+        <span class="rhint2" id="rEditHint"></span>
       </div>
     </div>
     <div class="mfoot">
@@ -1923,6 +1955,77 @@ rAvatarFile.onchange = async () => {
       rAvatarHint.textContent = "失败：" + (j.error || "?");
     }
   } catch (e) { rAvatarHint.textContent = "失败：" + e.message; }
+};
+
+/* ⭐ 编辑 / 删除嘉宾（2026-10-18 阿包要的）—— who 不改（它同时是头像文件名和 key 的键） */
+const egModal = document.getElementById("egModal");
+const egErr = document.getElementById("egErr");
+const rEditHint = document.getElementById("rEditHint");
+let egWho = "";
+
+document.getElementById("rEdit").onclick = async () => {
+  if (!rPicked) return;
+  try {
+    const ro = await (await fetch("/roster")).json();
+    const g = (ro.guests || []).find((x) => x.who === rPicked);
+    if (!g) { rEditHint.textContent = "读不到这位的资料"; return; }
+    egWho = rPicked;
+    document.getElementById("egTitle").textContent = "✏️ 编辑「" + (g.name || rPicked) + "」";
+    document.getElementById("egName").value = g.name || "";
+    document.getElementById("egBase").value = g.base_url || "";
+    document.getElementById("egModel").value = g.model || "";
+    document.getElementById("egOrg").value = g.org || "";
+    document.getElementById("egKey").value = "";
+    egErr.textContent = "";
+    egModal.classList.remove("hidden");
+  } catch (e) { rEditHint.textContent = "读取失败（服务在跑吗？）"; }
+};
+
+document.getElementById("egCancel").onclick = () => egModal.classList.add("hidden");
+
+document.getElementById("egSave").onclick = async () => {
+  const v = (id) => (document.getElementById(id).value || "").trim();
+  const payload = {
+    who: egWho, name: v("egName"), base_url: v("egBase"),
+    model: v("egModel"), org: v("egOrg")
+  };
+  egErr.textContent = "";
+  try {
+    const j = await (await fetch("/guest/edit", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    })).json();
+    if (!j.ok) { egErr.textContent = j.error || "保存失败"; return; }
+    const k = v("egKey");
+    if (k) {
+      await fetch("/keys", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ who: egWho, key: k })
+      });
+    }
+    egModal.classList.add("hidden");
+    if (!rosterModal.classList.contains("hidden")) openRoster();
+  } catch (e) { egErr.textContent = "保存失败（服务在跑吗？）"; }
+};
+
+document.getElementById("rDel").onclick = () => {
+  if (!rPicked) return;
+  const card = [...rGrid.children].find((c) => c.dataset.who === rPicked);
+  const nm = (card && card.querySelector("b")) ? card.querySelector("b").textContent : rPicked;
+  askConfirm("删掉这位嘉宾？",
+    `「${nm}」会从名单里移除 —— 它的 key、你给它传的头像也会一起清掉。这一步不能撤销。`,
+    "删除",
+    async () => {
+      try {
+        const j = await (await fetch("/guest/del", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ who: rPicked })
+        })).json();
+        if (j.ok) { openRoster(); }
+        else { rEditHint.textContent = "没删成：" + (j.error || "?"); }
+      } catch (e) { rEditHint.textContent = "删除失败（服务在跑吗？）"; }
+    },
+    "先等等");
 };
 
 function rSelect(who) {

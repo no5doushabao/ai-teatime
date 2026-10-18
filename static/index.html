@@ -362,6 +362,15 @@
 .keyrow input:focus { outline: 2px solid #7c5cff; outline-offset: 1px; }
 .keyrow .kx { flex: none; }
 
+/* ── ⭐ 添加嘉宾的小表单（2026-10-18）── */
+.gform { display: flex; flex-direction: column; gap: 7px; margin-top: 10px; }
+.gform .grow { display: flex; align-items: center; gap: 8px; }
+.gform label { width: 108px; font-size: 12px; color: #9c9cb2; flex: none; }
+.gform input { flex: 1; min-width: 0; background: rgba(255,255,255,.05);
+  border: 1px solid rgba(255,255,255,.14); border-radius: 7px; padding: 5px 8px;
+  color: inherit; font-size: 12.5px; }
+.gform input:focus { outline: 2px solid #7c5cff; outline-offset: 1px; }
+
 /* ── ⭐ 设置弹窗（2026-10-18 阿包要的）── */
 .setrow { display: flex; align-items: center; gap: 14px; padding: 14px 0; border-top: 1px solid rgba(255,255,255,.07); }
 .setrow:first-child { border-top: 0; padding-top: 2px; }
@@ -583,6 +592,21 @@
         </div>
         <div id="keyRows" class="keyrows"></div>
       </div>
+      <div class="setrow" style="display:block">
+        <div class="setmain">
+          <div class="setlab">添加一位 AI</div>
+          <div class="tip">填完保存，<b>下一场开局</b>就能上桌。没设头像的显示默认问号（在「👥 参会者一览」里可以换）。</div>
+        </div>
+        <div id="gForm" class="gform hidden">
+          <div class="grow"><label for="gName">昵称</label><input id="gName" placeholder="比如：豆包 / Kimi" autocomplete="off"></div>
+          <div class="grow"><label for="gBase">接口地址</label><input id="gBase" placeholder="https://api.example.com" autocomplete="off"></div>
+          <div class="grow"><label for="gModel">模型名</label><input id="gModel" placeholder="比如 doubao-lite-32k" autocomplete="off"></div>
+          <div class="grow"><label for="gOrg">小字（可选）</label><input id="gOrg" placeholder="头像下面那行，比如 Doubao" autocomplete="off"></div>
+          <div class="grow"><label for="gKey">API Key（可稍后填）</label><input id="gKey" type="password" placeholder="sk-…" autocomplete="new-password"></div>
+          <div class="grow"><span style="width:108px;flex:none"></span><button id="gSave">保存</button></div>
+        </div>
+        <button class="ghost" id="gToggle" style="margin-top:10px">➕ 添加一位 AI</button>
+      </div>
     </div>
     <div class="mfoot">
       <span class="hint" id="setHint"></span>
@@ -670,6 +694,12 @@
         <span class="rtag">主持人</span>
         <button class="ghost" id="rHost">👑 选她当主持</button>
         <span class="rhint2" id="rHostHint"></span>
+      </div>
+      <div class="rrow rrestrow">
+        <span class="rtag">头像</span>
+        <button class="ghost" id="rAvatar">🖼 换头像</button>
+        <span class="rhint2" id="rAvatarHint"></span>
+        <input type="file" id="rAvatarFile" accept="image/*" hidden>
       </div>
     </div>
     <div class="mfoot">
@@ -1606,6 +1636,39 @@ async function keySave(who, key) {
   } catch (e) { setHint.textContent = "保存失败（服务在跑吗？）"; }
 }
 
+/* ⭐ 添加一位 AI（2026-10-18）：写进 config.local.json 的 guests，下一场开局就上桌 */
+document.getElementById("gToggle").onclick = () => {
+  document.getElementById("gForm").classList.toggle("hidden");
+};
+
+document.getElementById("gSave").onclick = async () => {
+  const val = (id) => (document.getElementById(id).value || "").trim();
+  const payload = {
+    name: val("gName"), base_url: val("gBase"), model: val("gModel"),
+    org: val("gOrg"), key: val("gKey")
+  };
+  if (!payload.name || !payload.base_url || !payload.model) {
+    setHint.textContent = "昵称 / 接口地址 / 模型名 —— 三个都得填";
+    return;
+  }
+  setHint.textContent = "保存中…";
+  try {
+    const j = await (await fetch("/guest", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    })).json();
+    if (j.ok) {
+      ["gName", "gBase", "gModel", "gOrg", "gKey"].forEach(id => { document.getElementById(id).value = ""; });
+      document.getElementById("gForm").classList.add("hidden");
+      setHint.textContent = "已添加「" + j.name + "」—— 下一场开局上桌（头像默认问号，去参会者一览可以换）";
+      loadKeys();
+    } else {
+      setHint.textContent = "没加成：" + (j.error || "未知原因");
+    }
+    setTimeout(() => { setHint.textContent = ""; }, 3000);
+  } catch (e) { setHint.textContent = "保存失败（服务在跑吗？）"; }
+};
+
 document.getElementById("setBtn").onclick = () => { setLoad(); setModal.classList.remove("hidden"); };
 document.getElementById("setClose").onclick = () => setModal.classList.add("hidden");
 setStopOnClose.onchange = () => setSave(
@@ -1774,8 +1837,7 @@ function rPaintHost() {
   rHostHint.textContent = isHost ? "她负责开场白 / 每轮纪要 / 会议总结" : "";
 }
 
-rHostBtn.onclick = async () => {
-  if (!rPicked) return;
+rHostBtn.onclick = async () => {  if (!rPicked) return;
   const want = (rPicked === hostWho) ? "" : rPicked;
   rHostBtn.disabled = true;
   try {
@@ -1797,6 +1859,61 @@ rHostBtn.onclick = async () => {
   } finally {
     rHostBtn.disabled = false;
   }
+};
+
+/* ⭐ 换头像（2026-10-18）：裁成 256×256 再传，存进 avatars-user/（不进 git）；没设过就用问号 */
+const rAvatarBtn = document.getElementById("rAvatar");
+const rAvatarFile = document.getElementById("rAvatarFile");
+const rAvatarHint = document.getElementById("rAvatarHint");
+
+function compressAvatar(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onerror = () => reject(new Error("读不到这个文件"));
+    fr.onload = () => {
+      const im = new Image();
+      im.onerror = () => reject(new Error("这不是一张能识别的图片"));
+      im.onload = () => {
+        const S = 256;
+        const w = im.naturalWidth, h = im.naturalHeight;
+        const scale = Math.max(S / w, S / h);          // 铺满再居中裁
+        const cw = w * scale, ch = h * scale;
+        const cv = document.createElement("canvas");
+        cv.width = S; cv.height = S;
+        const cx = cv.getContext("2d");
+        cx.fillStyle = "#24242e"; cx.fillRect(0, 0, S, S);
+        cx.drawImage(im, (S - cw) / 2, (S - ch) / 2, cw, ch);
+        resolve(cv.toDataURL("image/png"));
+      };
+      im.src = fr.result;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+
+rAvatarBtn.onclick = () => { if (rPicked) rAvatarFile.click(); };
+rAvatarFile.onchange = async () => {
+  const f = rAvatarFile.files[0];
+  const who = rPicked;
+  rAvatarFile.value = "";
+  if (!f || !who) return;
+  rAvatarHint.textContent = "处理中…";
+  try {
+    const data = await compressAvatar(f);
+    const j = await (await fetch("/avatar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ who, data })
+    })).json();
+    if (j.ok) {
+      const card = [...rGrid.children].find(c => c.dataset.who === who);
+      const im = card && card.querySelector("img");
+      if (im) im.src = "/avatars/" + encodeURIComponent(who) + ".png?t=" + Date.now();
+      rAvatarHint.textContent = "已更新";
+      setTimeout(() => { rAvatarHint.textContent = ""; }, 1600);
+    } else {
+      rAvatarHint.textContent = "失败：" + (j.error || "?");
+    }
+  } catch (e) { rAvatarHint.textContent = "失败：" + e.message; }
 };
 
 function rSelect(who) {

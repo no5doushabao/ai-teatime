@@ -507,6 +507,83 @@ def keys_status() -> list:
     return rows
 
 
+# ── ⭐ 在界面上加嘉宾 / 换头像（2026-10-18 阿包要的）──────────────────────
+#    "让用户添加自己喜欢的 AI" —— 写进 config.local.json 的 guests（运行时那份，不进 git）。
+#    头像：用户上传的存 `avatars-user/<who>.png`（也不进 git）；没有就用 `static/avatars/_default.png`（问号）。
+AVATAR_MAX_BYTES = 4 * 1024 * 1024
+
+
+def add_guest(payload: dict) -> dict:
+    """加一位嘉宾。字段：name（必填）/ base_url（必填）/ model（必填）/ org / key / who（可省，自动生成）。"""
+    name = str(payload.get("name") or "").strip()
+    base = str(payload.get("base_url") or "").strip()
+    model = str(payload.get("model") or "").strip()
+    org = str(payload.get("org") or "").strip()
+    key = str(payload.get("key") or "").strip()
+    if not name or not base or not model:
+        return {"ok": False, "error": "昵称、接口地址、模型名 —— 这三个都得填"}
+    if not (base.startswith("http://") or base.startswith("https://")):
+        return {"ok": False, "error": "接口地址要以 http:// 或 https:// 开头"}
+
+    p = ROOT / "config.local.json"
+    cfg = load_json(p)
+    if not isinstance(cfg, dict) or not cfg.get("guests"):
+        cfg = load_json(ROOT / "config.example.json") or {}
+    guests = list(cfg.get("guests") or [])
+
+    # who：只留小写字母数字（它同时是头像文件名和内部 id）；撞名就加序号
+    who = re.sub(r"[^a-z0-9]+", "", str(payload.get("who") or "").lower())
+    if not who:
+        who = re.sub(r"[^a-z0-9]+", "", name.lower())[:16] or "guest"
+    taken = {str(g.get("who") or "") for g in guests} | {w for w, _n, _o in GUESTS}
+    base_who, i = who, 2
+    while who in taken:
+        who = f"{base_who}{i}"
+        i += 1
+
+    guests.append({
+        "who": who,
+        "name": name,
+        "org": org,
+        "base_url": base.rstrip("/"),
+        "model": model,
+        "key_names": [who],     # 填的 key 存 keys.local.json 的 who 名下
+        "persona": "",          # ⭐ 一律留空 = 只声明身份（见 config.example.json 的说明）
+    })
+    cfg["guests"] = guests
+    try:
+        p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        return {"ok": False, "error": f"写 config.local.json 失败：{e}"}
+    if key:
+        save_key(who, key)
+    return {"ok": True, "who": who, "name": name}
+
+
+def save_avatar(who: str, data_url: str) -> dict:
+    """存用户上传的头像（data URL）→ `avatars-user/<who>.png`（不进 git）。"""
+    if not who:
+        return {"ok": False, "error": "没有 who"}
+    m = re.match(r"^data:image/(?:png|jpeg|jpg|webp);base64,(.+)$", str(data_url or ""), re.S)
+    if not m:
+        return {"ok": False, "error": "不是有效的图片（要 data:image/...;base64,…）"}
+    try:
+        raw = base64.b64decode(m.group(1), validate=False)
+    except Exception:
+        return {"ok": False, "error": "base64 解不开"}
+    if not raw:
+        return {"ok": False, "error": "图片是空的"}
+    if len(raw) > AVATAR_MAX_BYTES:
+        return {"ok": False, "error": f"图太大了（>{AVATAR_MAX_BYTES // 1024 // 1024}MB）"}
+    d = ROOT / "avatars-user"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{who}.png").write_bytes(raw)
+    except Exception as e:
+        return {"ok": False, "error": f"存图失败：{e}"}
+    return {"ok": True}
+
+
 # ── ⭐ 让某位嘉宾「休息」：这一场她不参与（阿包 2026-10-12 凌晨要的）──────
 #    原话：「在设定每轮的思考量那里，假如某个 ai 我先让她休息的话，增加一个按钮，
 #            点了这次讨论她就不参与」。
@@ -3215,6 +3292,34 @@ class Handler(SimpleHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path.startswith("/avatars/"):      # ⭐ 头像：用户传的 → 自带的 → 问号兜底（2026-10-18）
+            name = self.path.split("?", 1)[0][len("/avatars/"):].replace("\\", "/").split("/")[-1]
+            if not name or ".." in name:
+                self.send_error(400)
+                return
+            for p in (ROOT / "avatars-user" / name, STATIC / "avatars" / name):
+                if p.is_file():
+                    data = p.read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type",
+                                     "image/png" if name.lower().endswith(".png") else "image/jpeg")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-store")   # ⚠️ 换了头像要立刻看到
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+            d = STATIC / "avatars" / "_default.png"                 # 没设过头像 → 问号
+            if d.is_file():
+                data = d.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            self.send_error(404)
+            return
         if self.path.startswith("/stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -3617,6 +3722,38 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"ok":true}')
+            return
+        if self.path == "/guest":                   # ⭐ 在界面上加一位嘉宾（2026-10-18）
+            n = int(self.headers.get("Content-Length", 0))
+            payload = {}
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                pass
+            res = add_guest(payload)
+            if res.get("ok"):
+                say("system", f"➕ 新嘉宾加入：「{res['name']}」—— 下一场开局就能上桌", "system")
+            body = json.dumps(res, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/avatar":                  # ⭐ 换头像（data URL → avatars-user/<who>.png）
+            n = int(self.headers.get("Content-Length", 0))
+            payload = {}
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                pass
+            res = save_avatar(str(payload.get("who") or ""), str(payload.get("data") or ""))
+            body = json.dumps(res, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if self.path == "/keys":                    # ⭐ 在界面上填 / 清除某位的 key（2026-10-18）
             n = int(self.headers.get("Content-Length", 0))

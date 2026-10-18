@@ -534,9 +534,10 @@
     <div class="abody">
       <div class="setrow">
         <div class="setmain">
-          <div class="setlab">界面关了就别算了</div>
-          <div class="tip">没人在看 <b>90 秒</b>后自动结束（当前这位说完就收尾）。
-            关掉 = 窗口关了它也继续跑完 —— 但 token 照样在花。</div>
+          <div class="setlab">关闭窗口后立即结束</div>
+          <div class="tip">关掉界面就不再往下跑了 —— <b>当前这位说完就收尾</b>，不再开新一轮。<br>
+            不勾选 = 窗口关了也在后台把这一轮跑完（token 照样花）。<br>
+            <span style="opacity:.72">刷新页面不算关窗口：会等 90 秒确认真的没人看了才停。</span></div>
         </div>
         <label class="switch"><input type="checkbox" id="setStopOnClose"><span></span></label>
       </div>
@@ -1489,7 +1490,7 @@ document.getElementById("setBtn").onclick = () => { setLoad(); setModal.classLis
 document.getElementById("setClose").onclick = () => setModal.classList.add("hidden");
 setStopOnClose.onchange = () => setSave(
   { stop_when_no_viewer: setStopOnClose.checked },
-  setStopOnClose.checked ? "界面关了 90 秒后自动结束" : "界面关了也继续跑完");
+  setStopOnClose.checked ? "关闭窗口后立即结束" : "关闭窗口后也会跑完这一轮");
 setAutoDefault.onchange = () => setSave(
   { auto_next_default: setAutoDefault.checked },
   setAutoDefault.checked ? "下次开场直接自动跑" : "下次开场每轮停下等你");

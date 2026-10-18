@@ -3208,9 +3208,9 @@ class Handler(SimpleHTTPRequestHandler):
                 _stop_when_no_viewer = bool(payload["stop_when_no_viewer"])
                 save_setting("stop_when_no_viewer", _stop_when_no_viewer)
                 say("system",
-                    "👀 已打开：关掉界面 90 秒后自动结束讨论（当前这位说完就收尾）"
+                    "👀 已打开：关闭窗口就结束（当前这位说完就收尾，不再开新一轮）"
                     if _stop_when_no_viewer else
-                    "👀 已关闭：界面关掉后讨论会继续跑完（注意 token 还会继续花）", "system")
+                    "👀 已关闭：关闭窗口后也会在后台把这一轮跑完（token 照样花）", "system")
             if "auto_next_default" in payload:
                 _auto_next_default = bool(payload["auto_next_default"])
                 save_setting("auto_next_default", _auto_next_default)

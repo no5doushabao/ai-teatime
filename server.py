@@ -417,6 +417,49 @@ def probe_all_models(delay: float = 3.0) -> None:
 load_model_files()                       # 启动先读上次的目录（没网也能显示上次结果）
 
 
+# ── ⭐ 主持人（2026-10-18 阿包要的）────────────────────────────────────────
+#    「主持人」= 开场白 + 每轮纪要 + 会议总览（原本这三件都写死在阿鱼身上）。
+#    现在可以在「参会者一览」里换人 / 取消；设成空 = 本场**没有主持人**
+#    → 没有开场白、没有纪要、也没有总结，开场前界面会先拦一次。
+#    状态存 `host.json`（运行时数据，不进 git）；**默认就是阿鱼**（跟以前一样）。
+_host_who = "ayu"
+
+
+def _host_path() -> Path:
+    return ROOT / "host.json"
+
+
+def load_host() -> str:
+    """读主持人设置。文件不存在 → 保持默认（阿鱼）。空字符串 = 明确「本场没有主持人」。"""
+    global _host_who
+    try:
+        d = json.loads(_host_path().read_text(encoding="utf-8"))
+        if isinstance(d, dict) and "who" in d:
+            _host_who = str(d.get("who") or "")
+    except Exception:
+        pass
+    return _host_who
+
+
+def save_host(who: str) -> bool:
+    try:
+        _host_path().write_text(json.dumps({"who": who}, ensure_ascii=False, indent=2),
+                                encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def host_name() -> str:
+    """主持人显示名（没有主持人时给空串）。"""
+    if not _host_who:
+        return ""
+    return next((n for w, n, _o in GUESTS if w == _host_who), _host_who)
+
+
+load_host()
+
+
 # ── ⭐ 让某位嘉宾「休息」：这一场她不参与（阿包 2026-10-12 凌晨要的）──────
 #    原话：「在设定每轮的思考量那里，假如某个 ai 我先让她休息的话，增加一个按钮，
 #            点了这次讨论她就不参与」。
@@ -1808,8 +1851,12 @@ class RealTable:
         """
         if not self.round_turns:
             return
-        me = next((g for g in self.roster if g["who"] == "ayu"), None)
+        # ⭐ 2026-10-18：记录员 = **主持人**（以前写死阿鱼）；没有主持人就明说一句，别再静默跳过
+        me = next((g for g in self.roster if g["who"] == _host_who), None)
         if me is None:
+            say("system", "📝 本场没有主持人，第 %d 轮纪要跳过 —— 公用历史框不会更新" % r
+                if not _host_who else
+                "📝 主持人不在座，第 %d 轮纪要跳过 —— 公用历史框不会更新" % r, "system")
             return
         persona = self.settings.get("recorder_persona") or (
             "你是这场讨论会的会议记录员。只提炼有实质价值的想法：核心论点、关键论据、"
@@ -1929,7 +1976,8 @@ class RealTable:
             say("system", f"（这议题是 {first['name']} 提的 —— 本轮让他先发言）", "system")
 
         # ⭐ 阿鱼当主持：开场白由真模型生成（不是固定台词）—— 宣布议题、讲规则、引出第一个争点
-        host = next((g for g in self.roster if g["who"] == "ayu"), None)
+        #    2026-10-18：主持人改成可配置（`host.json`）；没有主持人就跳过开场白
+        host = next((g for g in self.roster if g["who"] == _host_who), None) if _host_who else None
         if host:
             # ⭐ 关键修复：把"第一位是谁"**明确喂给它**。以前只说"交给第一位发言者"，
             #    模型拿不到名字只好自己猜（猜成"提案人先说"），于是出现
@@ -2273,9 +2321,10 @@ def summarize_debate() -> str:
         body = body[:20000] + "\n\n…（中间省略）…\n\n" + body[-20000:]
 
     roster = load_roster()
-    me = next((g for g in roster if g["who"] == "ayu" and g.get("ready")), None)
+    # ⭐ 2026-10-18：总结也归**主持人**（以前写死阿鱼）。没有主持人 → 明说一句，别装作成功了。
+    me = next((g for g in roster if g["who"] == _host_who and g.get("ready")), None) if _host_who else None
     if me is None:
-        say("system", "（没有可用的记录员模型）", "system")
+        say("system", "（本场没有主持人（或主持人不可用）—— 跳过会议总结）", "system")
         return ""
 
     say("system", "📝 阿鱼开始整理这场讨论的会议记录……", "system")
@@ -3061,6 +3110,19 @@ def selftest() -> int:
     finally:
         _model_override.pop("__nobody__", None)
 
+    # ⭐ 2026-10-18 主持人：默认阿鱼；能换成别人，也能明确"本场没有"
+    global _host_who
+    check(_host_who in ("ayu", "", "qwen", "gemini", "claude", "gpt"),
+          f"主持人设置读到了：{_host_who or '（本场没有主持人）'}")
+    _keep_host = _host_who
+    try:
+        _host_who = ""
+        check(host_name() == "", "没有主持人 → 显示名为空（界面据此弹「没有主持人」确认框）")
+        _host_who = "ayu"
+        check(host_name() == "阿鱼", "主持人显示名走 GUESTS 映射")
+    finally:
+        _host_who = _keep_host
+
     srv.shutdown()
     print(f"\nSELFTEST {'OK' if bad == 0 else 'FAIL'} 通过 {ok} 项 / 失败 {bad} 项")
     return 0 if bad == 0 else 1
@@ -3243,6 +3305,15 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/host":                   # ⭐ 谁是主持人（2026-10-18）
+            body = json.dumps({"ok": True, "who": _host_who, "name": host_name()},
+                              ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/models"):        # ⭐ 模型选单：读某位的可选清单（2026-10-18）
             q = self.path.split("?", 1)[1] if "?" in self.path else ""
             who = ""
@@ -3304,7 +3375,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        global _chosen_topic_index, _rounds_override, _auto_next, _auto_next_default, _stop_when_no_viewer
+        global _chosen_topic_index, _rounds_override, _auto_next, _auto_next_default, _stop_when_no_viewer, _host_who
         if self.path == "/ask_guest":               # ⭐ 现场提问：让某位在座的 AI 提议题备选
             n = int(self.headers.get("Content-Length", 0))
             try:
@@ -3490,6 +3561,29 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"ok":true}')
+            return
+        if self.path == "/host":                    # ⭐ 选她当主持 / 取消主持（2026-10-18）
+            n = int(self.headers.get("Content-Length", 0))
+            payload = {}
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                pass
+            who = str(payload.get("who") or "")
+            _host_who = who
+            save_host(who)
+            if who:
+                g = next((x for x in load_roster() if x.get("who") == who), None)
+                say("system",
+                    f"👑 主持人换成「{g['name'] if g else who}」—— 开场白 / 每轮纪要 / 会议总结都归她",
+                    "system")
+            else:
+                say("system", "👑 本场不设主持人 —— 没有开场白、没有每轮纪要、也没有会议总结"
+                              "（AI 们容易重复发言）", "system")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True, "who": _host_who}).encode("utf-8"))
             return
         if self.path == "/auto":                    # ⭐ 切换「⚡ 自动」
             n = int(self.headers.get("Content-Length", 0))

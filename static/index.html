@@ -275,6 +275,13 @@
     filter: drop-shadow(0 1px 2px rgba(0,0,0,.6));
   }
   .rcard.resting .rsleep { display: block; }
+/* ⭐ 主持人标记（2026-10-18 阿包要的）*/
+.rcard .rhost {
+  position: absolute; top: -9px; left: 50%; transform: translateX(-50%);
+  background: linear-gradient(135deg, #7c5cff, #a27bff); color: #fff;
+  font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px;
+  white-space: nowrap; box-shadow: 0 2px 6px rgba(0,0,0,.35); pointer-events: none;
+}
   .rcard.resting img { filter: grayscale(1); opacity: .38; }
   .rcard.resting b { color: #7c7c93; }
   .rrestrow { margin-top: 12px; }
@@ -639,6 +646,11 @@
         <button class="ghost" id="rRest">😴 让她休息（这场不参与）</button>
         <span class="rhint2" id="rRestHint"></span>
       </div>
+      <div class="rrow rrestrow">
+        <span class="rtag">主持人</span>
+        <button class="ghost" id="rHost">👑 选她当主持</button>
+        <span class="rhint2" id="rHostHint"></span>
+      </div>
     </div>
     <div class="mfoot">
       <span class="hint" id="rHint">点头像 → 拖滑块，调这位 AI 的思考用量</span>
@@ -965,10 +977,11 @@ document.getElementById("libClose").onclick = () => libModal.classList.add("hidd
 /* ⭐ 通用确认框 */
 const cfModal = document.getElementById("cfModal");
 let cfAction = null;
-function askConfirm(title, body, yesText, action) {
+function askConfirm(title, body, yesText, action, noText) {
   document.getElementById("cfTitle").textContent = title;
   document.getElementById("cfBody").textContent = body;
   document.getElementById("cfYes").textContent = yesText;
+  document.getElementById("cfNo").textContent = noText || "取消";
   cfAction = action;
   cfModal.classList.remove("hidden");
 }
@@ -1166,6 +1179,27 @@ function readRounds() {
 
 mStart.onclick = async () => {
   if (!canStart || pickedTopic === null) return;
+  // ⭐ 2026-10-18：开场前先看一眼有没有主持人 —— 没有就拦一下（阿包要的）
+  try {
+    const j = await (await fetch("/host")).json();
+    hostWho = j.who || "";
+  } catch (e) { /* 拿不到就按"有主持"放过，别因为一次请求把开场挡住 */ }
+  if (!hostWho) {
+    askConfirm(
+      "本场茶会没有主持人！",
+      "如果直接开始的话：没有开场白、没有每轮纪要、也可能没有会议总结 —— "
+      + "AI 们容易重复发言、忘了别人说过什么。真的要开始吗？",
+      "就这样开始",
+      doStartNow,
+      "先等等"
+    );
+    return;
+  }
+  await doStartNow();
+};
+
+/* ⭐ 真正开场（无主持人弹窗点了「就这样开始」也会走到这儿） */
+async function doStartNow() {
   const t = topicList.querySelector(`.titem[data-index="${pickedTopic}"] .tt`);
   if (t) {
     document.getElementById("topicText").textContent = t.textContent;
@@ -1180,7 +1214,7 @@ mStart.onclick = async () => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ topic_index: pickedTopic, rounds: readRounds(), resume })
   });
-};
+}
 document.getElementById("mClose").onclick = hideModal;
 // ⭐ 每次点开都重新读一遍议题 —— 以前只绑 showModal()，所以在「议题整理」里
 //    拖完顺序、加完议题，这里看到的还是开屏那一刻的旧列表（阿包发现的）
@@ -1615,6 +1649,10 @@ let rDefault = 1200;
 let rResting = {};         // who -> true（⭐ 谁在休息：这一场不参与，随时能叫回来）
 const rRest = document.getElementById("rRest");
 const rRestHint = document.getElementById("rRestHint");
+/* ⭐ 主持人（2026-10-18）：开场白 / 每轮纪要 / 会议总结都归她；空串 = 本场没有主持人 */
+const rHostBtn = document.getElementById("rHost");
+const rHostHint = document.getElementById("rHostHint");
+let hostWho = "ayu";
 
 function rSave(who, tokens) {
   return fetch("/think_budget", {
@@ -1648,16 +1686,53 @@ function rPaintRest() {
   rRestHint.textContent = on ? "休息中：不发言，也不算进「在场几位」" : "";
 }
 
-/* 卡片上的 😴 角标 / 灰头像 */
+/* 卡片上的 😴 角标 / 灰头像 / 👑 主持人标记 */
 function rPaintCardMarks() {
-  [...rGrid.children].forEach(c => c.classList.toggle("resting", !!rResting[c.dataset.who]));
+  [...rGrid.children].forEach(c => {
+    c.classList.toggle("resting", !!rResting[c.dataset.who]);
+    const b = c.querySelector(".rhost");
+    if (b) b.classList.toggle("hidden", c.dataset.who !== hostWho);
+  });
 }
+
+function rPaintHost() {
+  const isHost = !!rPicked && rPicked === hostWho;
+  rHostBtn.textContent = isHost ? "👑 取消主持（本场没有主持人）" : "👑 选她当主持";
+  rHostBtn.classList.toggle("on", isHost);
+  rHostHint.textContent = isHost ? "她负责开场白 / 每轮纪要 / 会议总结" : "";
+}
+
+rHostBtn.onclick = async () => {
+  if (!rPicked) return;
+  const want = (rPicked === hostWho) ? "" : rPicked;
+  rHostBtn.disabled = true;
+  try {
+    const r = await fetch("/host", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ who: want })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (j.ok) {
+      hostWho = j.who || "";
+      rPaintHost();
+      rPaintCardMarks();
+      rSub.textContent = hostWho
+        ? "主持人已换 —— 开场白 / 每轮纪要 / 会议总结都归她"
+        : "本场不设主持人 —— 没有开场白、纪要、总结";
+    } else {
+      rSub.textContent = "⚠️ 改不动 —— 服务还在跑吗？";
+    }
+  } finally {
+    rHostBtn.disabled = false;
+  }
+};
 
 function rSelect(who) {
   rPicked = who;
   [...rGrid.children].forEach(c => c.classList.toggle("on", c.dataset.who === who));
   rPanel.classList.remove("hidden");
   rPaint();
+  rPaintHost();
   rLoadModels(who);
 }
 
@@ -1750,11 +1825,13 @@ async function openRoster() {
   rosterModal.classList.remove("hidden");
   rSub.textContent = "正在读取…";
   try {
-    const [ro, tb] = await Promise.all([
+    const [ro, tb, ho] = await Promise.all([
       fetch("/roster").then(r => r.json()),
       fetch("/think_budget").then(r => r.json()),
+      fetch("/host").then(r => r.json()).catch(() => ({ who: "ayu" })),
     ]);
     const ready = (ro.guests || []).filter(g => g.ready);   // ⭐ 只列**已连接**的
+    hostWho = ho.who || "";                                  // ⭐ 谁是主持人（空 = 没有）
     rBudgets = tb.budgets || {};
     rResting = {};                                          // ⭐ 休息状态跟着 /roster 走
     (ro.guests || []).forEach(g => { if (g.resting) rResting[g.who] = true; });
@@ -1768,10 +1845,12 @@ async function openRoster() {
       d.dataset.who = g.who;
       d.innerHTML = `<img src="/avatars/${esc(g.who)}.png" alt="${esc(g.name)}">` +
                     `<span class="rsleep" title="休息中：这场不参与">😴</span>` +
+                    `<span class="rhost hidden">👑 主持</span>` +
                     `<b>${esc(g.name)}</b><i>${esc(g.org || "")}</i>`;
       d.onclick = () => rSelect(g.who);
       rGrid.appendChild(d);
     });
+    rPaintCardMarks();          // ⭐ 画上 👑 主持人标记（2026-10-18）
     const nRest = ready.filter(g => rResting[g.who]).length;
     rSub.textContent = `已连接 ${ready.length} 位` +
       (nRest ? ` · 😴 休息中 ${nRest} 位（这场上场 ${ready.length - nRest} 位）` : "") +

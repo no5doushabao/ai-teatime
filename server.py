@@ -1604,7 +1604,11 @@ def _pick_text(data: dict) -> str:
     msg = ch.get("message")
     if not isinstance(msg, dict):
         msg = {}
-    for k in ("content", "reasoning_content", "text"):    # 各家字段名不统一，挨个试
+    # ⭐ 2026-10-20：**不再把 `reasoning_content` 当正文回退** —— 那是模型的**思考**，不是回答。
+    #    以前 content 为空时会拿到思考（甚至整段英文 CoT）→ 思考被写进日志 / 写进「公用历史框」
+    #    （阿包 2026-10-19 深夜两张截图抓到：开场白是英文 CoT +「Draft:」；第 1 轮纪要整段英文）。
+    #    宁可返回空串（上层有"空内容"处理，见 `if intro:` / recorder 的空检查），也不能把思考当正文。
+    for k in ("content", "text"):    # 各家字段名不统一，挨个试（⚠️ reasoning_content 除外）
         v = msg.get(k)
         if isinstance(v, str) and v.strip():
             return v.strip()
@@ -1787,6 +1791,18 @@ def llm_call(base_url: str, model: str, api_key: str, messages: list,
     记进 `_PARAM_STYLE`，之后的发言直接用，不再来回试错。
     （Anthropic 那条参数是固定的，不必穷举 —— 见 `_anthropic_call()`。）
     """
+    # ⭐ 2026-10-20（阿包连续两次截图抓到）：deepseek-chat 有时会**把思考写进正文** ——
+    #    开场白那次是英文 CoT + 「Draft:」；更糟的是**第 1 轮纪要**，思考直接进了「公用历史框」，
+    #    后面每轮都会读到那段被污染的历史。只改开场白不够，这里给**所有**调用加一条全局禁令。
+    #    一份改动、全局生效（开场白那边还留着更具体的一句，不冲突）。
+    _NO_COT = ("\n\n⚠️ 直接输出最终内容：**不要**在回答里写任何思考过程、分析过程或草稿"
+               "（禁止出现「Let me…」「Need…」「Draft:」「The user wants」这类话）。")
+    messages = list(messages or [])
+    if messages and messages[0].get("role") == "system":
+        messages[0] = dict(messages[0], content=(messages[0].get("content") or "") + _NO_COT)
+    else:
+        messages.insert(0, {"role": "system", "content": _NO_COT.strip()})
+
     if _api_style(base_url, api) == "anthropic":
         return _anthropic_call(base_url, model, api_key, messages,
                                timeout, temperature, max_tokens)
@@ -2223,11 +2239,17 @@ class RealTable:
                      "② 说清规则（每轮每人发言一次、要有立场和论证、必须回应他人）；"
                      + tail +
                      "⚠️ 只准点这一位先发言，别安排别人的顺序（后面的顺序由系统轮转）。"
-                     "语气可以轻松、带点你自己的风格，但别拖沓。"},
+                     "语气可以轻松、带点你自己的风格，但别拖沓。"
+                     # ⭐ 2026-10-20（阿包截图抓到的）：模型把**思考过程**写进了正文
+                     #    （英文 CoT + 「Draft:」+ 中文草稿），思考把 max_tokens 吃掉，
+                     #    正文只剩半句 → 日志里出现「今晚议题：「如果你就是那」。两头都得治。
+                     "\n\n⚠️ **直接输出开场白正文**：不要写任何思考过程、不要写草稿、"
+                     "不要出现「Let me…」「Draft:」「首先我想…」这类话 —— 第一句话就是开场白本身。"},
                     {"role": "user", "content":
                         f"【本次议题】{s['topic']}\n\n【议题说明】\n"
                         f"{s.get('topic_body') or '（无额外说明）'}"},
-                ], max_tokens=600)
+                ], max_tokens=4000)   # ⭐ 600 → 4000：阿鱼是 deepseek-flash（**推理模型**），
+                                      #    思考 token 和正文共用这个预算；跟 think-budget.json 的 4000 对齐
                 if intro:
                     say("ayu", intro)
             except Exception as e:

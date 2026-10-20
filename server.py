@@ -60,7 +60,8 @@ STATIC = ROOT / "static"
 #    ① 连着跑几场**不用修** ② config / 日志头 / afterglow 这些**格式冻住**（改就得写迁移）
 #    ③ 别人 clone 下来能**一次装成** ④ 前端有最低限度的自动检查 ⑤ 待办清空
 #  ⚠️ 每次改动较大时记得抬这个号 —— 它出现在三处：界面右上角、每场日志的文件头、`GET /state`。
-VERSION = "0.3.3"        # 0.3.3（2026-10-20）：加「你的称呼」（owner_name）—— 以前全站写死「阿包」，
+VERSION = "0.3.4"        # 0.3.4（2026-10-20）：设置里加「🔄 检查更新」—— 查 GitHub 有没有新版，有就说怎么 git pull
+#                          0.3.3（2026-10-20）：加「你的称呼」（owner_name）—— 以前全站写死「阿包」，
                          #   别人下载后怎么改名都没用（阿包的朋友实测反馈）；设置弹窗里能改，下一场生效
 #                          0.3.2（2026-10-20）：往期讨论加「📥 导出 .md」
 #                          0.3.1（2026-10-20）：议题配图（最多 4 张，添加/编辑弹窗内置）+ 讨论氛围
@@ -82,6 +83,52 @@ def _git_short() -> str:
 
 BUILD = _git_short()                                   # 短 hash（没装 git / 不在仓库里就空）
 STARTED_AT = datetime.now().strftime("%Y-%m-%d %H:%M")  # 服务这次是什么时候起的
+
+
+def _ver_tuple(v: str):
+    """'0.3.10' → (0, 3, 10)；认不出来就 (0,)。用来比版本大小。"""
+    try:
+        return tuple(int(x) for x in str(v or "").lstrip("vV").split(".")[:3])
+    except Exception:
+        return (0,)
+
+
+def check_update() -> dict:
+    """⭐ 检查有没有新版本（2026-10-20 阿包要的：「设置里加个检查更新，大家只需要下载一次」）。
+
+    查 GitHub 的 latest release；**没发 Release 就退回查 tags**（我经常只打 tag）。
+    ⚠️ 网络不通（国内很常见）→ 返回 ok=False + 人话，别让按钮一直转圈。
+    """
+    repo = "no5doushabao/ai-teatime"
+    hdrs = {"User-Agent": "ai-teatime", "Accept": "application/vnd.github+json"}
+    tag = ""
+    url = f"https://github.com/{repo}/releases"
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/releases/latest", headers=hdrs)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode("utf-8", "replace"))
+        tag = str(d.get("tag_name") or "")
+        url = str(d.get("html_url") or url)
+    except Exception:
+        # 没 Release（或 404）→ 退回去看 tag
+        try:
+            req = urllib.request.Request(
+                f"https://api.github.com/repos/{repo}/tags", headers=hdrs)
+            with urllib.request.urlopen(req, timeout=10) as r:
+                tags = json.loads(r.read().decode("utf-8", "replace"))
+            tag = str((tags[0] or {}).get("name") or "") if isinstance(tags, list) and tags else ""
+        except Exception as e:
+            return {"ok": False, "current": VERSION,
+                    "err": f"连不上 GitHub（{type(e).__name__}）—— 手动看看 {url}"}
+    latest = tag.lstrip("vV")
+    if not latest:
+        return {"ok": False, "current": VERSION, "err": f"没读到最新版本号 —— 手动看看 {url}"}
+    return {
+        "ok": True, "current": VERSION, "latest": latest,
+        "has_update": _ver_tuple(latest) > _ver_tuple(VERSION),
+        "url": url,
+    }
 
 
 def build_line() -> str:
@@ -3771,6 +3818,14 @@ class Handler(SimpleHTTPRequestHandler):
             else:
                 body = json.dumps({"items": list_past_debates()},
                                   ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/update-check":           # ⭐ 检查更新（2026-10-20 阿包要的）
+            body = json.dumps(check_update(), ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))

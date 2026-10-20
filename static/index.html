@@ -619,6 +619,17 @@
       </div>
       <div class="setrow" style="display:block">
         <div class="setmain">
+          <div class="setlab">检查更新</div>
+          <div class="tip">查一下 GitHub 上有没有新版本 —— 有的话在项目目录里跑一句 <code>git pull</code> 就行，
+            <b>不用重新下载</b>。（网络连不上 GitHub 时会提示失败，手动去仓库页看也一样。）</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+          <button class="ghost" id="setCheckUpdate">🔄 检查更新</button>
+          <span id="setUpdateMsg" style="font-size:12px;color:#9a9aa8"></span>
+        </div>
+      </div>
+      <div class="setrow" style="display:block">
+        <div class="setmain">
           <div class="setlab">API Key（只写不回显）</div>
           <div class="tip">填了直接写进本机的 <code>keys.local.json</code>（不进 git）。已配置的只显示<b>末四位</b>。<br>
             没 key 的嘉宾不上场；填完可以去「👥 参会者一览」点「🔄 更新模型选单」验证能不能用。</div>
@@ -1845,6 +1856,28 @@ if (setMood) setMood.onchange = () => setSave(
 if (setOwner) setOwner.onchange = () => setSave(
   { owner_name: setOwner.value.trim() || "你" },
   "称呼改好了（下一场生效）");
+
+/* ⭐ 检查更新（2026-10-20）：查 GitHub 有没有新版本，有就说怎么更新（git pull，不用重下） */
+const setCheckUpdate = document.getElementById("setCheckUpdate");
+const setUpdateMsg = document.getElementById("setUpdateMsg");
+if (setCheckUpdate) setCheckUpdate.onclick = async () => {
+  setUpdateMsg.style.color = "#9a9aa8";
+  setUpdateMsg.textContent = "正在查 GitHub…";
+  try {
+    const j = await (await fetch("/update-check")).json();
+    if (!j.ok) {
+      setUpdateMsg.style.color = "#ffb3b3";
+      setUpdateMsg.textContent = j.err || "查不到（网络？）";
+    } else if (j.has_update) {
+      setUpdateMsg.style.color = "#9ee6a0";
+      setUpdateMsg.innerHTML = `有新版 v${j.latest}（当前 v${j.current}）—— 在目录里跑 <code>git pull</code> 就行`;
+    } else {
+      setUpdateMsg.textContent = `已是最新（v${j.current}）`;
+    }
+  } catch (e) {
+    setUpdateMsg.textContent = "检查失败：" + e;
+  }
+};
 
 /* ⭐ 版本号（2026-10-12，服务端是 0.2.0）：
    `PAGE_VERSION` 由服务端渲染时替换（server.py 的 `_serve_index()`），

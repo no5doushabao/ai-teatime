@@ -69,8 +69,7 @@
       "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
       "_note": "⭐ 国际站（阿包在 alibabacloud.com 注册的）。国内站 dashscope.aliyuncs.com 要 +86 手机验证，他在日本收不到短信 → 用不了",
       "model": "qwen-plus",
-      "_vision_note": "⚠️ qwen-plus 是**纯文本**模型，看不到图 —— 实测它自己说「我无法看到或访问任何图像」。阿包发图时它会收到一句「你看不到图，别猜」的说明（而不是收到图）。要看图得换 qwen-vl 那一系。",
-      "vision": false,
+      "_vision_note": "不要再写死 vision 了（2026-10-20 阿包发现）：它是死的，会把「当前模型」的选择整个盖掉 —— 千问换成能看图的模型之后，界面还说她看不见图。识别能力现在由 model_vision() 按模型名判断，只有在判断错了、你想手动纠正时才写这个字段。",
       "key_names": [
         "qwen",
         "DASHSCOPE_API_KEY"

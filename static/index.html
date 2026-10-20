@@ -747,6 +747,9 @@
         <button class="ghost" id="rModelRefresh" title="去这位嘉宾的服务器查一下现在有哪些模型（不影响正在进行的讨论）">🔄 更新模型选单</button>
       </div>
       <div class="rhint2" id="rModelHint"></div>
+      <!-- ⭐ 识图能力提示（阿包 2026-10-20 要的）：这位**当前选的模型**要是看不了图 /
+           没验证过，就在这儿明说 —— 不然用户发图过去，那位压根看不见，还以为它在装哑巴 -->
+      <div class="rwarn hidden" id="rVisionWarn"></div>
       <div class="rrow">
         <span class="rtag">思考用量</span>
         <input type="range" id="rRange" min="1000" max="16000" step="100" value="1200">
@@ -2226,7 +2229,13 @@ function rPaintModels() {
     opts.forEach(m => {
       const o = document.createElement("option");
       o.value = m;
-      o.textContent = m + (m === cur ? "  ← 在用" : "");
+      // ⭐ 每个模型标一下能不能看图（阿包 2026-10-20 要的：选到不识图的模型要能看出来）
+      const vs = (row.visionStates || {})[m] || "unknown";
+      const mark = vs === "ok" ? "  📷"
+                 : vs === "shaky" ? "  ⚠️ 识图不准"
+                 : vs === "none" ? "  🚫 看不到图"
+                 : "  ⚠️ 识图未验证";
+      o.textContent = m + mark + (m === cur ? "  ← 在用" : "");
       if (m === cur) o.selected = true;
       rModel.appendChild(o);
     });
@@ -2240,14 +2249,31 @@ function rPaintModels() {
   else hint = "还没查过 —— 点「🔄 更新模型选单」去问一下这位";
   rModelHint.textContent = hint;
   rModelHint.classList.toggle("warn", warn);
+
+  // ⭐ 识图能力提示（阿包 2026-10-20 要的）：说清"这位当前的模型"能不能看见你发的图。
+  //    四种状态说四种话 —— 别一律写"没有识图功能"（qwen-plus 明明收得下，只是认得不准）。
+  const vw = document.getElementById("rVisionWarn");
+  const vstate = row.visionState || (row.visionStates || {})[cur] || "unknown";
+  const VMSG = {
+    ok: "",
+    shaky: `⚠️「${cur}」收得下图片，但识图不准 —— 实测它把蓝色方块认成了三角形。` +
+           `发给它的图它可能说得头头是道，却是错的。`,
+    none: `⚠️「${cur}」没有识图功能 —— 你发的图它收不到，问它图里有什么只会瞎猜。`,
+    unknown: `⚠️「${cur}」的识图能力没验证过 —— 发图过去可能看不到（甚至直接报错），` +
+             `那这位这一轮就会掉线。想稳妥就换一个带 📷 的模型。`,
+  };
+  const vmsg = VMSG[vstate] || "";
+  vw.textContent = vmsg;
+  vw.classList.toggle("hidden", !vmsg);
 }
 
 async function rLoadModels(who) {
   try {
     const j = await (await fetch("/models?who=" + encodeURIComponent(who))).json();
-    rModels[who] = { current: j.current || "", models: j.models || [], at: j.at || "", error: j.error || "" };
+    rModels[who] = { current: j.current || "", models: j.models || [], at: j.at || "", error: j.error || "",
+                     visionStates: j.vision_states || {}, visionState: j.vision_state || "unknown" };
   } catch (e) {
-    rModels[who] = { current: "", models: [], at: "", error: "读取失败" };
+    rModels[who] = { current: "", models: [], at: "", error: "读取失败", visionStates: {}, visionState: "unknown" };
   }
   if (rPicked === who) rPaintModels();
 }

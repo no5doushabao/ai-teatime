@@ -289,6 +289,8 @@ def load_roster() -> list:
         item["model"] = model_for(item)
         item["models"] = (_model_catalog.get(who) or {}).get("models") or []
         item["vision"] = guest_vision(g)     # ⭐ 2026-10-20：走统一判断（config 没写就按模型名）
+        # ⭐ 三态：ok / shaky / unknown / none —— 界面按它说不同的话（别一口咬定「没有识图功能」）
+        item["vision_state"] = model_vision(model_for(g))
         # ⭐ config 里显式写了 api 的，记进 URL 表 —— llm_call() 照它选协议（见 _api_style）
         if (g.get("api") or "").strip():
             _URL_API[(g.get("base_url") or "").rstrip("/")] = _api_style(
@@ -867,26 +869,57 @@ def _inbox_item(x) -> dict:
     return {"text": str(x or ""), "image": ""}
 
 
-# ⭐ 实测过「纯文本、看不到图」的模型（2026-10-20 亲测：qwen-plus 自己说「我无法看到或访问图片内容」）
-#    只放**真测过**的，不确定的一律不放（宁可误判成"能看"，也不要瞎标"不能看"）
-_NO_VISION_MODELS = ("qwen-plus",)
+# ⭐ 看图能力：三态判断（2026-10-20 阿包提的「选到不识图的模型要提醒」）
+#
+#   为什么不能只分"能 / 不能"：实测下来有三种情况，混成两态就会说错话。
+#     · ok      —— 我**亲手测过**能看图（画一张红圆+蓝方，它能说出形状和颜色）
+#     · shaky   —— 收得下图，但**描述不准**（qwen-plus 把蓝方块说成三角，还编了个黄方块）
+#     · unknown —— 没测过（新模型、冷门家），发图过去可能直接 400
+#     · none    —— 已知根本收不了图
+#   阿包的原话：「如果用户选到了某个不能读图的 AI，则出现一个【注意：XXX 没识图功能】」——
+#   但 "none" 不好瞎标（qwen-plus 明明收了图），所以界面上按状态说不同的话，别一口咬定。
+_VISION_OK = (
+    "deepseek-", "gemini-", "gpt-", "claude-",        # 这四家实测都看得见（含 deepseek-flash / -chat）
+    "qwen3.8-", "qwen3-vl-", "qwen-vl-",              # 通义 3.8 系实测能看；vl 系本来就是视觉专用
+)
+_VISION_SHAKY = ("qwen-plus",)                        # 能收图，但认错（实测：蓝方→三角 + 编了个黄方块）
+_VISION_NONE = ("qwen-mt-", "qwen-plus-character", "qwen-flash-character")  # 翻译/角色扮演专用，别发图
+
+
+def model_vision(model: str) -> str:
+    """这个**模型**的看图能力 → 'ok' / 'shaky' / 'unknown' / 'none'。
+
+    ⚠️ 判断依据只有模型名 —— 而模型名**并不可靠**（实测：qwen3.8-flash 名字里没 vl 却能看图）。
+       所以这里只认三件事：① 我亲手测过的前缀（ok/shaky）② 明确不能的（none）③ 其余一律 unknown。
+       界面拿 unknown 去提示「没验证过」，而不是愣说「没有识图功能」——说错比不说更糟。
+    """
+    m = (model or "").lower().strip()
+    if not m:
+        return "unknown"
+    if any(k in m for k in _VISION_SHAKY):
+        return "shaky"
+    if any(k in m for k in _VISION_NONE):
+        return "none"
+    if m.startswith(_VISION_OK):
+        return "ok"
+    return "unknown"
 
 
 def guest_vision(guest: dict) -> bool:
-    """这位嘉宾能不能看图？
+    """这位嘉宾**这一次**能不能收到图？
 
-    优先级：config 里显式写的 `vision` > **按模型名自动判断** > 默认能看。
+    优先级：config 里显式写的 `vision` > 按**它当前选的模型**自动判断 > 默认按能看处理。
 
     ⚠️ 2026-10-20 改：以前只看 config，而 config 是**死**的 —— 界面上把模型从 `qwen-plus`
     换成 `qwen3.8-flash`（一个不能看图、一个能）之后，`vision` 还停在上一次的值，
     于是「某位看不了图」的开场提醒永远弹不出来（阿包要测就测不出来）。
-    现在 config 不写 `vision` 就按模型名判断。
+    ⚠️ 2026-10-20 晚再改：**config 里那条 `vision` 别再写死了** —— 它会把当前模型的选择
+    整个盖掉（阿包把千问换成能看图的模型，界面还说他"看不到图"）。要么删掉，要么别写。
     """
     g = guest or {}
-    if g.get("vision") is not None:
+    if g.get("vision") is not None:          # config 显式指定 → 用户说了算（可用于覆盖误判）
         return bool(g.get("vision"))
-    m = (model_for(g) or "").lower()
-    return not any(k in m for k in _NO_VISION_MODELS)
+    return model_vision(model_for(g)) != "none"
 
 
 _chosen_topic_index = 0          # ⭐ 阿包在界面上选的议题（0 = 第一个）
@@ -3797,7 +3830,11 @@ class Handler(SimpleHTTPRequestHandler):
                  # ⭐ resting：界面靠它画灰头像 + 😴 角标、「休息中 N 位」
                  "resting": bool(g.get("resting")),
                  # ⭐ vision：能不能看图（界面上可以提示"这位看不到图"）
-                 "vision": bool(g.get("vision", True))}
+                 "vision": bool(g.get("vision", True)),
+                 # ⭐ 当前模型的看图能力：ok / shaky / unknown / none ——
+                 #    参会者一览据此说不同的话（别一口咬定"没有识图功能"，qwen-plus 明明收了图）
+                 "vision_state": model_vision(model_for(g)),
+                 "model": model_for(g)}
                 for g in roster]}, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -3907,13 +3944,18 @@ class Handler(SimpleHTTPRequestHandler):
                     who = urllib.parse.unquote(v)
             g = next((x for x in load_roster() if x.get("who") == who), None)
             row = _model_catalog.get(who) or {}
+            _ms = row.get("models") or []
             body = json.dumps({
                 "ok": True,
                 "who": who,
                 "current": model_for(g) if g else "",
-                "models": row.get("models") or [],
+                "models": _ms,
                 "at": row.get("at") or "",
                 "error": row.get("error") or "",
+                # ⭐ 每个模型能不能看图 —— 模型下拉里逐条标 📷 / ⚠️ 用
+                #    （前端读目录走的是这条 GET，不是 POST，两边都得带）
+                "vision_states": {m: model_vision(m) for m in _ms},
+                "vision_state": model_vision(model_for(g) if g else ""),
             }, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -4169,7 +4211,10 @@ class Handler(SimpleHTTPRequestHandler):
             res = dict(probe_models(who))
             g = next((x for x in load_roster() if x.get("who") == who), None)
             res.update({"who": who, "current": model_for(g) if g else "",
-                        "at": (_model_catalog.get(who) or {}).get("at") or ""})
+                        "at": (_model_catalog.get(who) or {}).get("at") or "",
+                        # ⭐ 每个模型能不能看图 —— 模型下拉里逐条标 📷 / ⚠️
+                        "vision_states": {m: model_vision(m) for m in res.get("models", [])},
+                        "vision_state": model_vision(model_for(g) if g else "")})
             body = json.dumps(res, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")

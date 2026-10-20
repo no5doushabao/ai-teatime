@@ -96,34 +96,34 @@ def _ver_tuple(v: str):
 def check_update() -> dict:
     """⭐ 检查有没有新版本（2026-10-20 阿包要的：「设置里加个检查更新，大家只需要下载一次」）。
 
-    查 GitHub 的 latest release；**没发 Release 就退回查 tags**（我经常只打 tag）。
+    ⚠️ **两个源都查，取版本最大的**：Release 不一定每次发（我只打 tag 的时候多），
+       只认 `releases/latest` 会永远停在最后一个发过 Release 的版本（实测踩到）。
     ⚠️ 网络不通（国内很常见）→ 返回 ok=False + 人话，别让按钮一直转圈。
     """
     repo = "no5doushabao/ai-teatime"
     hdrs = {"User-Agent": "ai-teatime", "Accept": "application/vnd.github+json"}
-    tag = ""
     url = f"https://github.com/{repo}/releases"
-    try:
-        req = urllib.request.Request(
-            f"https://api.github.com/repos/{repo}/releases/latest", headers=hdrs)
-        with urllib.request.urlopen(req, timeout=10) as r:
-            d = json.loads(r.read().decode("utf-8", "replace"))
-        tag = str(d.get("tag_name") or "")
-        url = str(d.get("html_url") or url)
-    except Exception:
-        # 没 Release（或 404）→ 退回去看 tag
+    found, err = [], ""
+    for api in (f"https://api.github.com/repos/{repo}/tags",
+                f"https://api.github.com/repos/{repo}/releases/latest"):
         try:
-            req = urllib.request.Request(
-                f"https://api.github.com/repos/{repo}/tags", headers=hdrs)
+            req = urllib.request.Request(api, headers=hdrs)
             with urllib.request.urlopen(req, timeout=10) as r:
-                tags = json.loads(r.read().decode("utf-8", "replace"))
-            tag = str((tags[0] or {}).get("name") or "") if isinstance(tags, list) and tags else ""
+                d = json.loads(r.read().decode("utf-8", "replace"))
+            if isinstance(d, list):
+                found += [str((x or {}).get("name") or "") for x in d]
+            elif isinstance(d, dict):
+                found.append(str(d.get("tag_name") or ""))
+                if d.get("html_url"):
+                    url = str(d["html_url"])
         except Exception as e:
-            return {"ok": False, "current": VERSION,
-                    "err": f"连不上 GitHub（{type(e).__name__}）—— 手动看看 {url}"}
-    latest = tag.lstrip("vV")
-    if not latest:
-        return {"ok": False, "current": VERSION, "err": f"没读到最新版本号 —— 手动看看 {url}"}
+            err = f"{type(e).__name__}"
+            continue
+    vers = [v.lstrip("vV") for v in found if v.lstrip("vV")]
+    if not vers:
+        return {"ok": False, "current": VERSION,
+                "err": f"没读到最新版本号（{err or '空列表'}）—— 手动看看 {url}"}
+    latest = max(vers, key=_ver_tuple)
     return {
         "ok": True, "current": VERSION, "latest": latest,
         "has_update": _ver_tuple(latest) > _ver_tuple(VERSION),

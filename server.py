@@ -60,7 +60,9 @@ STATIC = ROOT / "static"
 #    ① 连着跑几场**不用修** ② config / 日志头 / afterglow 这些**格式冻住**（改就得写迁移）
 #    ③ 别人 clone 下来能**一次装成** ④ 前端有最低限度的自动检查 ⑤ 待办清空
 #  ⚠️ 每次改动较大时记得抬这个号 —— 它出现在三处：界面右上角、每场日志的文件头、`GET /state`。
-VERSION = "0.3.2"        # 0.3.2（2026-10-20）：往期讨论加「📥 导出 .md」（下载任意一场的完整记录）
+VERSION = "0.3.3"        # 0.3.3（2026-10-20）：加「你的称呼」（owner_name）—— 以前全站写死「阿包」，
+                         #   别人下载后怎么改名都没用（阿包的朋友实测反馈）；设置弹窗里能改，下一场生效
+#                          0.3.2（2026-10-20）：往期讨论加「📥 导出 .md」
 #                          0.3.1（2026-10-20）：议题配图（最多 4 张，添加/编辑弹窗内置）+ 讨论氛围
                          #   （学术研讨 / 轻松聊天）+ 重置 = 真删（战绩 + 日志，删前备份）+ 识图提醒
                          #   （选议题前就警告谁看不了图）+ 修纪要思考泄漏 / 空结果 / webp 的 MIME
@@ -1588,7 +1590,10 @@ _MOOD_MIN_CHARS = {"academic": 300, "casual": 80}
 
 
 def load_settings() -> dict:
+    global _OWNER
     cfg = load_json(ROOT / "config.local.json") or load_json(ROOT / "config.example.json")
+    # ⭐ 用户称呼（2026-10-20）：默认「你」；别人在 config 里写自己的名字，全站就跟着换
+    _OWNER = str(cfg.get("owner_name") or "你").strip() or "你"
     d = cfg.get("debate") or {}
     md = parse_topics()
     if md:                                     # ⭐ 优先用 topics.md
@@ -1630,6 +1635,7 @@ def load_settings() -> dict:
         # ⭐ 「⚙ 设置」弹窗的两个开关（2026-10-18 加，阿包要的）—— 启动读一次，界面上随时能改
         "auto_next_default": bool(cfg.get("auto_next_default", False)),
         "stop_when_no_viewer": bool(cfg.get("stop_when_no_viewer", False)),
+        "owner_name": _OWNER,                       # ⭐ 用户称呼（2026-10-20）
     }
 
 
@@ -1656,15 +1662,29 @@ def broadcast(msg: dict) -> None:
             # ⭐ 带图的消息，日志里也留一行图片链接 —— 日志是 .md，回看时能直接显示；
             #    不留的话，过几天再看记录就不知道当时发的什么图了（2026-10-12）
             img = msg.get("image") or ""
-            tag = f"\n  ![阿包发的图]({img})\n" if img else ""
+            tag = f"\n  ![图]({img})\n" if img else ""
             f.write(f"- **{msg.get('ts','')} {who}**：{msg.get('text','')}{tag}\n")
     except Exception:
         pass
 
 
+# ⭐ 用户称呼（2026-10-20 加）：以前全站写死「阿包」，别人下载后改了名也没用 ——
+#    阿包的朋友下载后，AI 们还管他叫「阿包」。现在默认「你」，在 config.local.json 的
+#    `owner_name` 里改（设置弹窗里也有输入框），所有界面消息和发给模型的提示词都会跟着换。
+_OWNER = "你"
+
+
+def _own(text: str) -> str:
+    """把文本里的「阿包」换成用户自己的称呼。"""
+    if not text or "阿包" not in text:
+        return text
+    return text.replace("阿包", _OWNER)
+
+
 def say(who: str, text: str, kind: str = "chat", image: str = "") -> None:
+    text = _own(text)
     if who == "boss":
-        name, org = "阿包", "旁听席"
+        name, org = _OWNER, "旁听席"
     elif who == "system":
         name, org = "", ""
     else:
@@ -1886,6 +1906,32 @@ def _anthropic_call(base_url: str, model: str, api_key: str, messages: list,
     raise last if last else RuntimeError("_anthropic_call: 没有成功过一次")
 
 
+def _own_messages(messages: list) -> list:
+    """把所有发给模型的文本里的「阿包」换成用户自己的称呼（2026-10-20）。
+
+    ⚠️ 只换 **text** 部分，图片块原样保留（别去动 base64）。
+    """
+    out = []
+    for m in (messages or []):
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            out.append({**m, "content": _own(c)})
+        elif isinstance(c, list):
+            parts = []
+            for p in c:
+                if isinstance(p, dict) and p.get("type") == "text":
+                    parts.append({**p, "text": _own(p.get("text") or "")})
+                else:
+                    parts.append(p)
+            out.append({**m, "content": parts})
+        else:
+            out.append(m)
+    return out
+
+
 def llm_call(base_url: str, model: str, api_key: str, messages: list,
              timeout: int = 180, temperature: float = 0.9,
              max_tokens: int = None, api: str = "") -> str:
@@ -1908,6 +1954,7 @@ def llm_call(base_url: str, model: str, api_key: str, messages: list,
     _NO_COT = ("\n\n⚠️ 直接输出最终内容：**不要**在回答里写任何思考过程、分析过程或草稿"
                "（禁止出现「Let me…」「Need…」「Draft:」「The user wants」这类话）。")
     messages = list(messages or [])
+    messages = _own_messages(messages)      # ⭐ 提示词里的「阿包」→ 用户自己的称呼
     if messages and messages[0].get("role") == "system":
         messages[0] = dict(messages[0], content=(messages[0].get("content") or "") + _NO_COT)
     else:
@@ -3746,6 +3793,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "auto_next": _auto_next,
                 "grace": VIEWER_GRACE_SECONDS,
                 "mood": load_settings().get("mood", "academic"),   # ⭐ 讨论氛围（2026-10-20）
+                "owner_name": load_settings().get("owner_name", "你"),   # ⭐ 你的称呼
             }, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -4010,6 +4058,11 @@ class Handler(SimpleHTTPRequestHandler):
                     "⚡ 已设为默认自动：下次开场就直接自己跑完，不用每轮点「开始下一轮」"
                     if _auto_next_default else
                     "⏸ 已设为默认手动：下次开场还是每轮停下等你点「开始下一轮」", "system")
+            if "owner_name" in payload:                 # ⭐ 你的称呼（2026-10-20）
+                global _OWNER
+                _OWNER = str(payload.get("owner_name") or "").strip() or "你"
+                save_setting("owner_name", _OWNER)
+                say("system", f"🪪 你的称呼改成「{_OWNER}」了（下一场生效）", "system")
             if "mood" in payload:                       # ⭐ 讨论氛围（2026-10-20 阿包要的）
                 m = str(payload.get("mood") or "").strip().lower()
                 if m not in ("academic", "casual"):

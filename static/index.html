@@ -598,6 +598,15 @@
       </div>
       <div class="setrow">
         <div class="setmain">
+          <div class="setlab">你的称呼</div>
+          <div class="tip">AI 们怎么叫你（默认「你」）。改完<b>下一场</b>生效 ——
+            以前它写死叫「阿包」，别人下载后改了名也没用。</div>
+        </div>
+        <input id="setOwner" placeholder="你" autocomplete="off" maxlength="16"
+               style="width:130px;padding:6px 9px;border-radius:8px;border:1px solid #34343f;background:#1c1c24;color:#e8e8f0">
+      </div>
+      <div class="setrow">
+        <div class="setmain">
           <div class="setlab">讨论氛围</div>
           <div class="tip">🍵 轻松聊天 = 短句口语、可以接梗吐槽、不用举证点名、不用总结（每人每次 80 字起）。<br>
             🎓 学术研讨 = 立场 + 论证 + 点名回应 + 举证纪律（原来那套，每人每次 300 字起）。<br>
@@ -1710,6 +1719,7 @@ const setHint = document.getElementById("setHint");
 const setStopOnClose = document.getElementById("setStopOnClose");
 const setAutoDefault = document.getElementById("setAutoDefault");
 const setMood = document.getElementById("setMood");      // ⭐ 讨论氛围（2026-10-20）
+const setOwner = document.getElementById("setOwner");    // ⭐ 你的称呼（2026-10-20）
 
 async function setLoad() {
   try {
@@ -1717,6 +1727,7 @@ async function setLoad() {
     setStopOnClose.checked = !!j.stop_when_no_viewer;
     setAutoDefault.checked = !!j.auto_next_default;
     if (setMood) setMood.value = j.mood || "academic";   // ⭐ 讨论氛围
+    if (setOwner) setOwner.value = j.owner_name || "你";  // ⭐ 你的称呼
   } catch (e) { setHint.textContent = "读取失败"; }
   loadKeys();                       // ⭐ 顺带把各家 key 的配置状态拉一遍（只回末四位）
 }
@@ -1831,6 +1842,9 @@ setAutoDefault.onchange = () => setSave(
 if (setMood) setMood.onchange = () => setSave(
   { mood: setMood.value },
   setMood.value === "casual" ? "🍵 轻松聊天（下一场生效）" : "🎓 学术研讨（下一场生效）");
+if (setOwner) setOwner.onchange = () => setSave(
+  { owner_name: setOwner.value.trim() || "你" },
+  "称呼改好了（下一场生效）");
 
 /* ⭐ 版本号（2026-10-12，服务端是 0.2.0）：
    `PAGE_VERSION` 由服务端渲染时替换（server.py 的 `_serve_index()`），

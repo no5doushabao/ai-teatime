@@ -4188,7 +4188,16 @@ class Handler(SimpleHTTPRequestHandler):
             model = str(payload.get("model") or "").strip()
             g = next((x for x in load_roster() if x.get("who") == who), None)
             if not who or g is None:
-                self.send_error(400)
+                # ⚠️ 以前这里 `self.send_error(400)` —— 回的是**HTML 错误页**，前端按 JSON 解析会炸。
+                #    全站就它一个例外（2026-10-20 全面体检扫出来的），改成和别的接口一样的 JSON。
+                body = json.dumps({"ok": False,
+                                   "error": f"名单里没有「{who or '（空）'}」"},
+                                  ensure_ascii=False).encode("utf-8")
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
                 return
             if model:
                 _model_override[who] = model
@@ -4478,7 +4487,7 @@ def main() -> None:
     ensure_topics()          # ⭐ 第一次运行：把工程自带的默认议题复制成"你自己的库"
     settings = load_settings()
     # ⭐ 「⚙ 设置」两个开关的初值（2026-10-18）：config 里写了、或在弹窗里点过，都从这儿生效
-    global _auto_next, _auto_next_default, _stop_when_no_viewer, GUESTS
+    global _auto_next, _auto_next_default, _stop_when_no_viewer, GUESTS, _log_path
     _auto_next_default = bool(settings.get("auto_next_default"))
     _stop_when_no_viewer = bool(settings.get("stop_when_no_viewer"))
     _auto_next = _auto_next_default
@@ -4489,8 +4498,16 @@ def main() -> None:
     use_real = args.real or (not args.demo and len(ready) >= 1)
 
     # ⭐ 每场讨论开一个新的日志文件（别再覆盖上一场的记录了）
-    logp = init_log(settings["topic"])
-    print(f"📄 本场记录：{logp}")
+    #    ⚠️ **demo 模式不建正式日志**（2026-10-20 修）：假台词会混进「往期讨论」的战绩里 ——
+    #       阿包已经翻到过两次假场次（10-15 的「杯子我来洗」、10-20 的两场）。
+    #       demo 只是让人逛界面，不需要留记录。
+    if use_real:
+        logp = init_log(settings["topic"])
+        print(f"📄 本场记录：{logp}")
+    else:
+        logp = None
+        _log_path = None
+        print("📄 demo 模式（假数据）：不写正式日志")
 
     def boot():
         time.sleep(args.delay)          # 等阿包把窗口打开

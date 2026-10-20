@@ -2891,6 +2891,29 @@ def start_requested(resume: bool = False) -> bool:
     _start_settings = load_settings()
     want = _start_settings["topic"]
 
+    # ⭐⭐ 人数守卫（2026-10-20 补，阿包说「补上吧」）：点开场之前**先数一数现在有几位能说话的**。
+    #
+    #    以前这里不数，于是「没填 key」或「全员休息」时点「开始讨论」——
+    #    接口照样回 ok=true、界面以为开场了，可 `idle_loop` 那边的条件是
+    #    `len(live_ready()) >= settings["min_guests"]`，不满足就**不消费**这个事件：
+    #      · 表现①：一片安静，他干等（最容易让人以为"这软件坏了"）
+    #      · 表现②：`_start_event` 一直留着 —— 等他后来填好 key，服务会**自己突然开场**
+    #        （他什么都没点，这比表现①更吓人）
+    #
+    #    ⚠️ 必须放在 init_log() **之前**：不然被拦下也会留下一个空日志文件。
+    #    ⚠️ 用 load_roster() 现场重读：他可能刚在「⚙ 设置」里粘了 key，要立刻算数。
+    live = [g for g in load_roster() if g.get("ready") and not is_resting(g["who"])]
+    need = int(_start_settings.get("min_guests") or 1)
+    if len(live) < need:
+        who = "、".join(g["name"] for g in live) or "一个人都没有"
+        tip = ("去「⚙ 设置 → API Key」里填一个（不用碰文件），"
+               "或者把休息的请回来")
+        if not live:
+            tip += "；实在没有 key，也可以先 `python server.py --demo` 看看界面"
+        say("system", f"⚠️ 现在只有 {len(live)} 位能用（{who}），至少要 {need} 位才开得了场 —— {tip}",
+            "system")
+        return False
+
     # ⭐ 要不要开新日志文件？（2026-10-11 晚重写）
     #    旧写法是 `want[:18] not in str(_log_path.name)` —— 拿**议题原文**去比**文件名**，
     #    可文件名里的空格早被 init_log() 换成 `-` 了 → 含空格的议题永远比不中、每次都新建，

@@ -32,6 +32,7 @@ import os
 import queue
 import random
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -59,7 +60,10 @@ STATIC = ROOT / "static"
 #    ① 连着跑几场**不用修** ② config / 日志头 / afterglow 这些**格式冻住**（改就得写迁移）
 #    ③ 别人 clone 下来能**一次装成** ④ 前端有最低限度的自动检查 ⑤ 待办清空
 #  ⚠️ 每次改动较大时记得抬这个号 —— 它出现在三处：界面右上角、每场日志的文件头、`GET /state`。
-VERSION = "0.3.0"        # 0.3.0（2026-10-18）：⚙ 设置弹窗 / 👑 主持人可选 / 🤖 模型选单 / 续场换人提示 / 昵称改造
+VERSION = "0.3.1"        # 0.3.1（2026-10-20）：议题配图（最多 4 张，添加/编辑弹窗内置）+ 讨论氛围
+                         #   （学术研讨 / 轻松聊天）+ 重置 = 真删（战绩 + 日志，删前备份）+ 识图提醒
+                         #   （选议题前就警告谁看不了图）+ 修纪要思考泄漏 / 空结果 / webp 的 MIME
+#                          0.3.0（2026-10-18）：⚙ 设置弹窗 / 👑 主持人可选 / 🤖 模型选单 / 续场换人提示 / 昵称改造
 #                          0.2.1（10-15）：发言可复制 / 链接可点 / 输入框多行
 
 
@@ -234,7 +238,7 @@ def load_roster() -> list:
         # ⭐ 2026-10-18：模型也带上 —— `model` 是当前用的（界面显示），`models` 是上次探测到的可选清单
         item["model"] = model_for(item)
         item["models"] = (_model_catalog.get(who) or {}).get("models") or []
-        item["vision"] = bool(g.get("vision", True))   # ⭐ 能不能看图（千问显式关掉）
+        item["vision"] = guest_vision(g)     # ⭐ 2026-10-20：走统一判断（config 没写就按模型名）
         # ⭐ config 里显式写了 api 的，记进 URL 表 —— llm_call() 照它选协议（见 _api_style）
         if (g.get("api") or "").strip():
             _URL_API[(g.get("base_url") or "").rstrip("/")] = _api_style(
@@ -765,6 +769,25 @@ def save_shot(data_url: str) -> str:
     return f"/shots/{name}"
 
 
+def _sniff_image_mime(raw: bytes) -> str:
+    """⭐ 看**文件头**判断图片类型（2026-10-20）。
+
+    为什么不用 `mimetypes.guess_type()`：Windows 上它**不认 `.webp`**，
+    会回退成 `image/jpeg` —— 而 Claude 会硬校验「声明的 media_type 和实际内容是否一致」，
+    于是直接 400（实测报错原文：`The image was specified using the image/jpeg media type,
+    but the image appears to be a image/webp image`）。别的模型不较真，只有 Claude 炸。
+    """
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if raw[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
 def image_data_url(shot_url: str) -> str:
     """把 `/shots/xxx` 读回来变成 data URL（喂给模型用）。读不到返回 ""。"""
     if not shot_url or not shot_url.startswith("/shots/"):
@@ -779,8 +802,7 @@ def image_data_url(shot_url: str) -> str:
         raw = p.read_bytes()
     except Exception:
         return ""
-    mime = mimetypes.guess_type(name)[0] or "image/jpeg"
-    return f"data:{mime};base64," + base64.b64encode(raw).decode()
+    return f"data:{_sniff_image_mime(raw)};base64," + base64.b64encode(raw).decode()
 
 
 def _inbox_item(x) -> dict:
@@ -795,13 +817,26 @@ def _inbox_item(x) -> dict:
     return {"text": str(x or ""), "image": ""}
 
 
-def guest_vision(guest: dict) -> bool:
-    """这位嘉宾能不能看图？config 里的 `vision` 说了算，没写就**默认能**（实测 5 位里 4 位能）。
+# ⭐ 实测过「纯文本、看不到图」的模型（2026-10-20 亲测：qwen-plus 自己说「我无法看到或访问图片内容」）
+#    只放**真测过**的，不确定的一律不放（宁可误判成"能看"，也不要瞎标"不能看"）
+_NO_VISION_MODELS = ("qwen-plus",)
 
-    ⚠️ 唯一一位看不到的是千问（`qwen-plus` 是纯文本）—— 它的 config 里显式写了 `vision: false`。
-       实测脚本：`_probe/teatime-check-vision.py`（画张红圆蓝方，看它认不认得出来）。
+
+def guest_vision(guest: dict) -> bool:
+    """这位嘉宾能不能看图？
+
+    优先级：config 里显式写的 `vision` > **按模型名自动判断** > 默认能看。
+
+    ⚠️ 2026-10-20 改：以前只看 config，而 config 是**死**的 —— 界面上把模型从 `qwen-plus`
+    换成 `qwen3.8-flash`（一个不能看图、一个能）之后，`vision` 还停在上一次的值，
+    于是「某位看不了图」的开场提醒永远弹不出来（阿包要测就测不出来）。
+    现在 config 不写 `vision` 就按模型名判断。
     """
-    return bool((guest or {}).get("vision", True))
+    g = guest or {}
+    if g.get("vision") is not None:
+        return bool(g.get("vision"))
+    m = (model_for(g) or "").lower()
+    return not any(k in m for k in _NO_VISION_MODELS)
 
 
 _chosen_topic_index = 0          # ⭐ 阿包在界面上选的议题（0 = 第一个）
@@ -889,6 +924,12 @@ def parse_topics() -> list:
     if cur:
         out.append(cur)
     for t in out:
+        # ⭐ 议题配图（2026-10-20，阿包要的**上限 4 张**）：正文里 `![...](/shots/xxx)` 行全抽出来，
+        #    正文里剥干净 —— 免得模型把 markdown 图片语法当成正文念。
+        t["images"] = [x.strip() for x in
+                       re.findall(r"!\[[^\]]*\]\(([^)\s]+)\)", t["body"])][:4]
+        if t["images"]:
+            t["body"] = re.sub(r"!\[[^\]]*\]\([^)\s]+\)[ \t]*\n?", "", t["body"])
         t["body"] = strip_tail_seps(t["body"].strip())      # ⭐ 剥掉尾巴上的 `---`（见上方说明）
         t["author"] = parse_author(t["body"])
         t["edited"] = parse_edited(t["body"])               # ⭐ 被人工改过的话，正文里有留痕
@@ -1005,6 +1046,10 @@ def write_topics(items: list) -> bool:
     lines = [head, ""]
     for t in items:
         lines += ["", "---", "", f"## {t['title']}", ""]
+        for _im in (t.get("images") or [])[:4]:             # ⭐ 议题配图（上限 4 张，2026-10-20）
+            lines += [f"![图]({_im})"]
+        if t.get("images"):
+            lines += [""]
         if t.get("body"):
             lines += [t["body"], ""]
     try:
@@ -1012,6 +1057,25 @@ def write_topics(items: list) -> bool:
     except Exception:
         return False
     return True
+
+
+def set_topic_images(title: str, images: list) -> bool:
+    """⭐ 给某个议题设 / 换 / 删配图（传空列表 = 全删）—— 2026-10-20 阿包要的（**上限 4 张**）。
+
+    图本身由 `save_shot()` 存进 `shots/`（返回 `/shots/xxx`），这里只负责把
+    `![图](/shots/xxx)` 行写回 `topics.md`（解析在 `parse_topics()`，写回走 `write_topics()`）。
+    """
+    items = parse_topics()
+    want = (title or "").strip()
+    final = [str(x).strip() for x in (images or []) if str(x).strip()][:4]
+    hit = False
+    for t in items:
+        if t["title"].strip() == want:
+            t["images"] = final
+            hit = True
+    if not hit:
+        return False
+    return write_topics(items)
 
 
 def delete_topic(index: int, expect: str = "") -> bool:
@@ -1092,20 +1156,41 @@ def rename_history_topic(old: str, new: str) -> int:
     return n
 
 
-def reset_topic(title: str) -> int:
-    """⭐ 清掉某个议题的讨论战绩（议题一览里的「重置」按钮）——清完它就能重新讨论。
+def reset_topic(title: str) -> dict:
+    """⭐ 清掉某个议题的讨论战绩 **并删掉它的日志文件**（议题一览里的「重置」按钮）。
 
-    只动 `debate-history.json`，不碰 `topics.md` 和已落盘的日志文件。
-    返回清掉的场次数。
+    ⚠️ 2026-10-20 改（阿包要求「重置键要真能删掉」）：以前只清 `debate-history.json`，
+       日志留在磁盘上 —— 「往期讨论」列表里看不见了，但续场 / 以后按 logs 做事照样
+       读到被污染的内容。现在两边一起动，让用户能真正控制。
+
+    安全网：删之前先把文件拷到 `_backup/reset-<时间戳>/`，误删能捞回来。
+    `topics.md` 不动（议题本身保留，清完就能重新讨论）。
+
+    返回 {"cleared": 清掉的战绩条数, "deleted": 删掉的日志文件数}。
     """
     want = (title or "").strip()
     if not want:
-        return 0
+        return {"cleared": 0, "deleted": 0}
     h = load_history()
     before = len(h["debates"])
     h["debates"] = [d for d in h["debates"] if (d.get("topic") or "").strip() != want]
     save_history(h)
-    return before - len(h["debates"])
+
+    # 删日志：用 find_debates 按**文件名里的规范名**匹配（比日志里那行「议题：」准），
+    # 并排掉**当前正在跑的那场**（不然会把正在写的日志删掉）。
+    deleted = 0
+    files = find_debates(want, exclude=_log_path if _log_path else None)
+    if files:
+        bdir = ROOT / "_backup" / ("reset-" + time.strftime("%Y%m%d-%H%M%S"))
+        for p in files:
+            try:
+                bdir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(p, bdir / p.name)
+                p.unlink()
+                deleted += 1
+            except Exception:
+                pass
+    return {"cleared": before - len(h["debates"]), "deleted": deleted}
 
 
 def parse_candidate_topics(text: str) -> list:
@@ -1484,6 +1569,23 @@ def author_in_roster(author: str, roster: list):
     return None
 
 
+# ⭐ 讨论氛围（2026-10-20 阿包要的：「现在太像学术研讨会了」）———————
+#    两档：academic = 现在这套（立场 + 论证 + 点名回应 + 举证纪律）；
+#          casual   = 闲聊（短句、口语、可以接梗吐槽，不用举证 / 点名 / 总结）。
+#    ⚠️ academic **不覆盖** style —— 直接沿用 config 里那段（阿包自己改过的话还算数）。
+_MOOD_STYLE = {
+    "casual": (
+        "这是一场**朋友间的闲聊**，不是答辩、也不是研讨会。要求：\n"
+        "① **说人话**：短句、口语，一般 80~200 字，有话就多说两句、没话别硬凑；\n"
+        "② **可以接梗、吐槽、自嘲、偶尔跑题** —— 有情绪没问题；\n"
+        "③ 观点要有，但**不用**摆证据链、**不用**点名回应、**不用**「第一、第二、第三」那种结构；\n"
+        "④ 别互相吹捧，也别硬抬杠：像熟人聊天，赞同就赞同，觉得不对就说「我倒觉得…」；\n"
+        "⑤ **不用写总结陈词**，说完了就完了。"
+    ),
+}
+_MOOD_MIN_CHARS = {"academic": 300, "casual": 80}
+
+
 def load_settings() -> dict:
     cfg = load_json(ROOT / "config.local.json") or load_json(ROOT / "config.example.json")
     d = cfg.get("debate") or {}
@@ -1492,11 +1594,16 @@ def load_settings() -> dict:
         topics = [t["title"] for t in md]
         bodies = {t["title"]: t["body"] for t in md}
         authors = {t["title"]: t.get("author", "") for t in md}    # ⭐ 命题人：开场白要照实说
+        imgs = {t["title"]: (t.get("images") or []) for t in md}   # ⭐ 议题配图（列表，上限 4）
     else:                                      # 兜底：config 里的 topics
         topics = [t for t in (d.get("topics") or []) if t] or [d.get("topic") or "随便聊聊。"]
-        bodies, authors = {}, {}
+        bodies, authors, imgs = {}, {}, {}
     idx = max(0, min(_chosen_topic_index, len(topics) - 1))
     topic = topics[idx]
+    # ⭐ 讨论氛围（casual / academic）—— 认不出来就退回 academic
+    _mood = str(d.get("mood") or "academic").strip().lower()
+    if _mood not in _MOOD_MIN_CHARS:
+        _mood = "academic"
     return {
         # ⭐ 界面上的「预设轮数」优先（阿包在议题框里自己填的那个），没填才用 config
         "rounds": _rounds_override or int(cfg.get("rounds", 12)),
@@ -1507,11 +1614,13 @@ def load_settings() -> dict:
         # ⭐ 议题讨论会（2026-10-10 改版：从"闲聊"改成"议题讨论"）
         "topic": topic,
         "topic_body": bodies.get(topic, ""),
+        "topic_images": imgs.get(topic, []),       # ⭐ 议题配图（/shots/xxx 列表，上限 4 张）
         "topic_author": authors.get(topic, ""),    # ⭐ 命题人（开场白 + 第一轮顺序要用）
         "topic_index": idx,
         "topics": topics,
-        "style": d.get("style", "这是一场议题讨论会：请有明确立场、有论证、并回应他人观点。"),
-        "min_chars": int(d.get("min_chars", 300)),
+        "style": _MOOD_STYLE.get(_mood) or d.get("style", "这是一场议题讨论会：请有明确立场、有论证、并回应他人观点。"),
+        "min_chars": int(_MOOD_MIN_CHARS.get(_mood) or d.get("min_chars", 300)),
+        "mood": _mood,
         "max_tokens": int(d.get("max_tokens", 1200)),
         "recorder_persona": d.get("recorder_persona", ""),
         "host_persona": d.get("host_persona", ""),
@@ -1983,8 +2092,12 @@ class RealTable:
             return ""
         return "\n\n".join(f"（第 {r} 轮）{t}" for r, t in rows)
 
-    def ask(self, guest: dict, prompt: str, image: str = "") -> str:
+    def ask(self, guest: dict, prompt: str, images=None) -> str:
         s = self.settings
+        # ⭐ 议题配图（2026-10-20，上限 4 张）：没有"阿包插话的图"时，就用**议题自己的图** —— 每轮都带上
+        shots = [x for x in (images or []) if x]
+        if not shots:
+            shots = list(s.get("topic_images") or [])[:4]
         name = guest.get("name") or guest["who"]
         sys_prompt = (guest.get("persona") or f"你是{name}。") + "\n\n" + s["style"] + \
             f"\n\n⚠️ 不要敷衍：至少 {s['min_chars']} 字，把论点讲透、把话说完。" + \
@@ -2015,16 +2128,14 @@ class RealTable:
                     {"role": "user", "content": user}]
         # ⭐ 阿包发了图：**能看图的直接看图**；看不到的（千问）明确告诉他"你看不到"，
         #    别让他猜图里有什么（那是最容易编造的场景）
-        shot_data = image_data_url(image) if image else ""
-        if shot_data and guest_vision(guest):
-            messages[1]["content"] = [
-                {"type": "text", "text": user},
-                {"type": "image_url", "image_url": {"url": shot_data}},
-            ]
-        elif image:
+        datas = [d for d in (image_data_url(x) for x in shots) if d][:4]
+        if datas and guest_vision(guest):
+            messages[1]["content"] = ([{"type": "text", "text": user}] +
+                                      [{"type": "image_url", "image_url": {"url": d}} for d in datas])
+        elif shots:
             messages[1]["content"] = user + (
-                "\n\n【阿包发来一张图】⚠️ 你这类模型看不到图片内容 —— **别猜图里有什么**，"
-                "就基于上面的文字部分回应；想提这张图的话，可以直说「我看不到图，但…」。")
+                f"\n\n【阿包发来 {len(shots)} 张图】⚠️ 你这类模型看不到图片内容 —— **别猜图里有什么**，"
+                "就基于上面的文字部分回应；想提这些图的话，可以直说「我看不到图，但…」。")
         self.spent_tokens += rough_tokens(sys_prompt) + rough_tokens(user)
         # ⭐ 思考用量**按人取**：在「参会者一览」里拖过的用它自己的，没拖过用 config 默认；
         #    返回 None = 那位被勾了"不限制"（llm_call 收到 None 就压根不传 max_tokens）
@@ -2104,9 +2215,16 @@ class RealTable:
                 {"role": "user", "content":
                     f"【议题】{self.settings['topic']}\n\n【本轮全部发言】\n{body}\n\n"
                     f"请提炼本轮要点。"},
-            ], max_tokens=500)
+            ], max_tokens=3000)   # ⭐ 500 → 3000：flash 是推理模型，**思考和正文共用这个预算**，
+                                  #    500 会被思考吃光 → content 为空 → 纪要只剩标题（2026-10-20 实测）
         except Exception as e:
             say("system", f"（记录员整理失败：{type(e).__name__}）", "system")
+            return
+        if not (note or "").strip():
+            # ⭐ 空结果不能再静默写进历史框（以前会留下一个空「### 第 N 轮」）
+            say("system",
+                f"（第 {r} 轮纪要生成失败：模型只输出了思考、正文为空 —— 这轮历史框跳过）",
+                "system")
             return
         self.notes += f"\n### 第 {r} 轮\n{note.strip()}\n"
         say("system", f"📝 第 {r} 轮纪要（写入公用历史框）：\n{note.strip()}", "system")
@@ -2174,6 +2292,15 @@ class RealTable:
         say("system", f"本次议题：{s['topic']}", "system")
         say("system", f"规则：每轮每人各发言一次，每次至少 {s['min_chars']} 字；"
                       f"发言前须读完本轮已发言的全部内容", "system")
+        # ⭐ 有配图、但有人看不了图 → 开场就在屏幕上点出来（2026-10-20 阿包要的）
+        _topic_imgs = list(s.get("topic_images") or [])
+        if _topic_imgs:
+            _blind = [g for g in self.roster if not guest_vision(g)]
+            for _g in _blind:
+                say("system",
+                    f"⚠️ 注意：{_g['name']} 目前的模型 {model_for(_g)} 没有识图能力！"
+                    f"这一场的 {len(_topic_imgs)} 张配图 TA 看不到（只会收到一句说明，不会瞎猜）。",
+                    "system")
         # ⭐ 「继续讨论」：上一次的要点已经翻出来了 → 当作本场**公用历史框的起点**
         #    （公用历史框本来就每轮往上累积，这里只是给它一个不为空的开头）
         recap = (s.get("recap") or "").strip()
@@ -2233,6 +2360,18 @@ class RealTable:
                          f"必须给出**可核实的来源**（机构或作者 + 标题 + 年份，有网址就贴网址）；"
                          f"给不出出处就别当事实讲，更不许编一个像真的出处。")
             try:
+                # ⭐ 议题配图（2026-10-20）：主持人开场时也带上议题的图
+                _iu = (f"【本次议题】{s['topic']}\n\n【议题说明】\n"
+                       f"{s.get('topic_body') or '（无额外说明）'}")
+                _tis = list(s.get("topic_images") or [])[:4]
+                if _tis:
+                    _tds = [d for d in (image_data_url(x) for x in _tis) if d]
+                    if _tds and guest_vision(host):
+                        _iu = ([{"type": "text", "text": _iu}] +
+                               [{"type": "image_url", "image_url": {"url": d}} for d in _tds])
+                    else:
+                        _iu += (f"\n\n【议题配了 {len(_tis)} 张图】⚠️ 你这个模型看不到图片内容 —— "
+                                "别猜图里有什么，就基于文字部分开场。")
                 intro = llm_call(host["base_url"], model_for(host), host["key"], [
                     {"role": "system", "content": (host.get("persona") or "") +
                      "\n\n你是这场讨论会的主持人。请用 150~300 字开场：① 宣布今晚的议题；"
@@ -2245,9 +2384,7 @@ class RealTable:
                      #    正文只剩半句 → 日志里出现「今晚议题：「如果你就是那」。两头都得治。
                      "\n\n⚠️ **直接输出开场白正文**：不要写任何思考过程、不要写草稿、"
                      "不要出现「Let me…」「Draft:」「首先我想…」这类话 —— 第一句话就是开场白本身。"},
-                    {"role": "user", "content":
-                        f"【本次议题】{s['topic']}\n\n【议题说明】\n"
-                        f"{s.get('topic_body') or '（无额外说明）'}"},
+                    {"role": "user", "content": _iu},
                 ], max_tokens=4000)   # ⭐ 600 → 4000：阿鱼是 deepseek-flash（**推理模型**），
                                       #    思考 token 和正文共用这个预算；跟 think-budget.json 的 4000 对齐
                 if intro:
@@ -2280,7 +2417,7 @@ class RealTable:
                     time.sleep(random.uniform(*s["gap"]))
                     try:
                         t = self.ask(g, f"阿包（旁听的人类）插了一句：「{q}」—— 请在你的发言里正面回应他。",
-                                     image=shot)
+                                     images=([shot] if shot else None))
                     except Exception as e:
                         say("system", f"（{g['name']} 掉线了：{type(e).__name__}）", "system")
                         continue
@@ -2486,6 +2623,23 @@ def save_setting(key: str, value) -> None:
     if not isinstance(cfg, dict):
         cfg = load_json(ROOT / "config.example.json") or {}
     cfg[key] = value
+    p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def save_setting_debate(key: str, value) -> None:
+    """把设置写回 `config.local.json` 的 **debate.<key>**（比如 mood）—— ⚠️ 只改这一个键。
+
+    跟 `save_setting()` 分开，是因为那两个开关是顶层键，而这些是 debate 下面的。
+    """
+    p = ROOT / "config.local.json"
+    cfg = load_json(p)
+    if not isinstance(cfg, dict):
+        cfg = load_json(ROOT / "config.example.json") or {}
+    d = cfg.get("debate")
+    if not isinstance(d, dict):
+        d = {}
+    d[key] = value
+    cfg["debate"] = d
     p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -3495,7 +3649,8 @@ class Handler(SimpleHTTPRequestHandler):
                 # ⭐ reason = 剥掉元信息行的纯理由 → 「✏️ 编辑」弹窗预填
                 "topics": [{"index": i, "title": t["title"],
                             "author": t.get("author", ""), "body": t.get("body", ""),
-                            "edited": t.get("edited", ""), "reason": t.get("reason", "")}
+                            "edited": t.get("edited", ""), "reason": t.get("reason", ""),
+                            "images": t.get("images", [])}       # ⭐ 议题配图（2026-10-20）
                            for i, t in enumerate(md)],
                 "current": s["topic_index"],
                 "ready": ready_n,
@@ -3567,6 +3722,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "auto_next_default": _auto_next_default,
                 "auto_next": _auto_next,
                 "grace": VIEWER_GRACE_SECONDS,
+                "mood": load_settings().get("mood", "academic"),   # ⭐ 讨论氛围（2026-10-20）
             }, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -3728,17 +3884,57 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path == "/topics/reset":           # ⭐ 议题一览：重置某个议题的讨论战绩
+        if self.path == "/topics/image":           # ⭐ 议题配图：上传 / 换图 / 删图（2026-10-20）
             n = int(self.headers.get("Content-Length", 0))
-            cleared = 0
+            ok, msg, img_list = False, "", []
             try:
                 payload = json.loads(self.rfile.read(n) or b"{}")
-                cleared = reset_topic(payload.get("title") or "")
-                if cleared:
-                    say("system", f"♻️ 已重置该议题的讨论战绩（清掉 {cleared} 场记录）", "system")
+                title = str(payload.get("title") or "").strip()
+                raw = payload.get("images")
+                if raw is None:                    # 兼容老的单图字段
+                    raw = [payload.get("image")] if payload.get("image") else []
+                keys = [str(x).strip() for x in (raw or []) if str(x).strip()][:4]
+                if not title:
+                    msg = "没给议题名"
+                else:
+                    final = []
+                    for k in keys:
+                        if k.startswith("/shots/"):
+                            final.append(k)                    # 已经在 shots/ 里的原样保留
+                        else:
+                            saved = save_shot(k)               # data URL → 存进 shots/
+                            if saved:
+                                final.append(saved)
+                    ok = set_topic_images(title, final)
+                    img_list = final
+                    msg = ((f"已保存 {len(final)} 张配图（下一场开场就带上）" if final else "已清空配图")
+                           if ok else "没找到这个议题（可能刚改过，重开议题整理再来）")
+            except Exception as e:
+                msg = f"{type(e).__name__}: {e}"
+            body = json.dumps({"ok": ok, "msg": msg, "images": img_list},
+                              ensure_ascii=False).encode("utf-8")
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/topics/reset":           # ⭐ 议题一览：重置战绩 **+ 删日志**（2026-10-20）
+            n = int(self.headers.get("Content-Length", 0))
+            res = {"cleared": 0, "deleted": 0}
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+                title = payload.get("title") or ""
+                res = reset_topic(title)
+                if res.get("cleared") or res.get("deleted"):
+                    say("system",
+                        f"♻️ 已重置「{title}」：清掉 {res.get('cleared', 0)} 场战绩、"
+                        f"删掉 {res.get('deleted', 0)} 个日志文件（备份在 _backup/reset-*）",
+                        "system")
             except Exception:
-                cleared = 0
-            body = json.dumps({"ok": True, "cleared": cleared}, ensure_ascii=False).encode("utf-8")
+                res = {"cleared": 0, "deleted": 0}
+            body = json.dumps({"ok": True, "cleared": res.get("cleared", 0),
+                               "deleted": res.get("deleted", 0)}, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -3791,6 +3987,17 @@ class Handler(SimpleHTTPRequestHandler):
                     "⚡ 已设为默认自动：下次开场就直接自己跑完，不用每轮点「开始下一轮」"
                     if _auto_next_default else
                     "⏸ 已设为默认手动：下次开场还是每轮停下等你点「开始下一轮」", "system")
+            if "mood" in payload:                       # ⭐ 讨论氛围（2026-10-20 阿包要的）
+                m = str(payload.get("mood") or "").strip().lower()
+                if m not in ("academic", "casual"):
+                    m = "academic"
+                save_setting_debate("mood", m)
+                say("system",
+                    "🍵 讨论氛围已切到「轻松聊天」：**下一场**开始生效 —— 短句、口语、可以接梗吐槽，"
+                    "每人每次 80 字起，不用点名回应、不用举证、不用总结"
+                    if m == "casual" else
+                    "🎓 讨论氛围已切到「学术研讨」：**下一场**开始生效 —— 立场 + 论证 + 点名回应 + 举证纪律",
+                    "system")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()

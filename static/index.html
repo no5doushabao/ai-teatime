@@ -508,6 +508,7 @@
     <button id="send">发送</button>
   </div>
   <input type="file" id="imgFile" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+  <input type="file" id="topicImgFile" accept="image/png,image/jpeg,image/webp" hidden>
 </footer>
 
 <!-- ⭐ 议题选择弹窗：每次打开窗口都会弹出来 -->
@@ -544,6 +545,10 @@
       <label for="addAuthor">由谁提供</label>
       <input id="addAuthor" placeholder="你自己的名字，或某个 AI 的名字" autocomplete="off" maxlength="24">
       <div class="tip">留空也行 —— 议题整理里会显示「（未标注）」</div>
+      <label>配图（可选，最多 4 张）</label>
+      <div id="addImgList" style="display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 8px"></div>
+      <div><button class="ghost" id="addImgPick">🖼 加一张图</button></div>
+      <div class="tip">选完立刻预览，点缩略图右上角的 ✕ 去掉。这些图会在<b>开场白和每一轮发言</b>时带给嘉宾（看不到图的模型会收到说明，不会瞎猜）。</div>
       <div class="errtxt" id="addErr"></div>
 
       <!-- ⭐ 现场提问：点了按钮才展开 -->
@@ -590,6 +595,18 @@
           <div class="tip">开场就直接「⚡ 自动」跑完，不用每轮点「▶ 开始下一轮」。</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutoDefault"><span></span></label>
+      </div>
+      <div class="setrow">
+        <div class="setmain">
+          <div class="setlab">讨论氛围</div>
+          <div class="tip">🍵 轻松聊天 = 短句口语、可以接梗吐槽、不用举证点名、不用总结（每人每次 80 字起）。<br>
+            🎓 学术研讨 = 立场 + 论证 + 点名回应 + 举证纪律（原来那套，每人每次 300 字起）。<br>
+            <span style="opacity:.72">改完<b>下一场</b>生效；正在跑的这一场不变。</span></div>
+        </div>
+        <select id="setMood" style="min-width:136px">
+          <option value="academic">🎓 学术研讨</option>
+          <option value="casual">🍵 轻松聊天</option>
+        </select>
       </div>
       <div class="setrow" style="display:block">
         <div class="setmain">
@@ -863,13 +880,34 @@ function hideModal() { modal.classList.add("hidden"); }
 
 // ⚠️ 2026-10-14 起没有"只列前 N 个"这件事了 —— 议题框**列出全部**、容器自己滚（阿包要的）
 
+let blindGuests = [];      // 看不了图的嘉宾（/roster 里 vision=false 且 ready）
+let hintDefault = "";      // 底部那句的默认文案（配图提醒临时盖掉它，盖完还原）
+
+/* ⭐ 2026-10-20 阿包要的：**点「开始讨论」之前**就提醒 ——
+   哪个议题有配图、而谁看不了图。等开场后才说就晚了。 */
+function paintBlindWarn(t) {
+  const imgs = (t && t.images) || [];
+  const blind = blindGuests || [];
+  if (imgs.length && blind.length) {
+    mHint.innerHTML = `⚠️ <b>${blind.map(g => esc(g.name)).join("、")}</b> ` +
+      `目前的模型没有识图能力 —— 这个议题的 ${imgs.length} 张配图 TA 看不到`;
+    mHint.style.color = "#ffb0b0";
+  } else {
+    mHint.style.color = "";
+    mHint.textContent = hintDefault;
+  }
+}
+
 function loadTopics() {
   // ⭐ 每次都重新读（以前只在开屏读一次，所以在议题整理里拖完序，这里还是旧顺序）
   Promise.all([
     fetch("/topics").then(r => r.json()),
-    fetch("/history").then(r => r.json()).catch(() => ({ debates: [] }))
-  ]).then(([d, h]) => {
+    fetch("/history").then(r => r.json()).catch(() => ({ debates: [] })),
+    fetch("/roster").then(r => r.json()).catch(() => ({ guests: [] }))   // ⭐ 识图能力（2026-10-20）
+  ]).then(([d, h, ro]) => {
     const debates = (h && h.debates) || [];
+    // ⭐ 谁看不了图（ready 的里面）—— 给「开始讨论」之前那条提醒用
+    blindGuests = (((ro || {}).guests) || []).filter(g => g.ready && !g.vision);
     // ⭐ 每条议题"聊过几场" —— 「继续讨论」按钮判定用。
     topicDebates = {};
     d.topics.forEach(t => {
@@ -884,6 +922,7 @@ function loadTopics() {
     canStart = d.ready >= d.min_guests;
     mSub.textContent = `共 ${n} 个议题 · 在场 ${d.ready} 位（至少 ${d.min_guests} 位可开场）`;
     mHint.textContent = canStart ? "选一个议题，阿鱼会开场主持" : `⚠️ 只有 ${d.ready} 位就绪，还差 ${d.min_guests - d.ready} 位`;
+    hintDefault = mHint.textContent;      // ⭐ 配图提醒要临时盖掉它，盖完还要能还原
     mStart.disabled = !canStart;
     shown.forEach(t => {
       // ⭐ 由谁提供 + 已经讨论了多少轮 + 谁参与过
@@ -892,6 +931,7 @@ function loadTopics() {
       const who = [...new Set(mine.flatMap(x => x.participants || []))].join("、");
       const bits = [t.author ? `由 ${esc(t.author)} 提供`
                              : `<span class="todo">（未标注提出者）</span>`];
+      if ((t.images || []).length) bits.push(`📷 <span class="done">${t.images.length} 张配图</span>`);
       if (rounds) bits.push(`<span class="done">已讨论 ${rounds} 轮</span>`);
       if (who) bits.push(`参与者：<span class="who">${esc(who)}</span>`);
       const el = document.createElement("div");
@@ -910,6 +950,7 @@ function loadTopics() {
         if (canStart) document.getElementById("topicText").textContent =
           t.title + (t.edited ? "（已修改）" : "");
         paintStartBtn();             // ⭐ 聊过的 → 「继续讨论」，新议题 → 「开始讨论」
+        paintBlindWarn(t);           // ⭐ 有配图 + 有人看不了 → 「开始讨论」之前就提醒（2026-10-20）
       };
       topicList.appendChild(el);
       if (pickedTopic === null) pickedTopic = d.current;
@@ -920,6 +961,7 @@ function loadTopics() {
     more.textContent = `共 ${n} 个议题都在这儿（滚动列表看全部）—— 想加新议题、删改或调顺序，点「📋 议题整理」`;
     topicList.appendChild(more);
     paintStartBtn();               // ⭐ 开屏默认选中那条也要标对（聊过 → 「继续讨论」）
+    paintBlindWarn(shown.find(x => x.index === pickedTopic));   // ⭐ 开屏就检查一次配图提醒
     showModal();
     // ⭐ 全列之后，"选中那条"可能在滚动区外面 —— 自动滚到它，别让他找不到选的是哪个
     const sel = topicList.querySelector(".titem.sel");
@@ -973,6 +1015,9 @@ function attachDnD(el) {
   };
 }
 
+/* ⭐ 议题配图（2026-10-20）：文件选择器由「添加/编辑议题」弹窗共用 */
+const topicImgFile = document.getElementById("topicImgFile");
+
 function showLib(note) {
   libModal.classList.remove("hidden");
   libSub.textContent = "正在读取…";
@@ -1005,14 +1050,15 @@ function showLib(note) {
       // ⭐ 由谁提供（阿包要的，显示在战绩前面）
       const by = tp.author ? `由 <span class="who">${esc(tp.author)}</span> 提供 · ` : `<span class="todo">（未标注提出者）</span> · `;
       meta = by + meta;
+      if ((tp.images || []).length) meta += ` · <span class="done">📷 ${tp.images.length} 张配图</span>`;
       const edtag = tp.edited
         ? `<span class="edtag" title="这条议题被改过（最后改于 ${esc(tp.edited)}）">（已修改）</span>` : "";
       el.innerHTML =
         `<div class="hrow"><div class="hd"><span class="grip">⠿</span><span class="num">${tp.index + 1}.</span>` +
         `<span class="ht">${esc(tp.title)}${edtag}</span></div>` +
         `<div class="hbtns">` +
-        `<button class="ibtn edt" title="改题目 / 理由 / 由谁提供">✏️ 编辑</button>` +
-        `<button class="ibtn rst" title="清空这个议题的讨论战绩（议题保留）">♻️ 重置</button>` +
+        `<button class="ibtn edt" title="改题目 / 理由 / 由谁提供 / 配图">✏️ 编辑</button>` +
+        `<button class="ibtn rst" title="删除这个议题的所有讨论记录（战绩 + 日志文件，删前备份）">♻️ 重置</button>` +
         `<button class="ibtn del" title="从议题库删掉这个议题">🗑 删除</button>` +
         `</div></div><div class="hm">${meta}</div>`;
       // ⭐ 按钮必须阻止拖动，否则点按钮会变成"拖动议题"
@@ -1024,7 +1070,7 @@ function showLib(note) {
       if (rt) rt.onclick = e => {
         e.stopPropagation();
         askConfirm("♻️ 重置讨论战绩",
-          `把「${tp.title}」的讨论记录清空？\n\n议题本身会保留，清完就能重新讨论。已经落盘的日志文件不会删。`,
+          `把「${tp.title}」的讨论记录删掉？\n\n会删：讨论战绩 + **该议题的所有日志文件**（删前自动备份到 _backup/reset-*，误删能捞回来）。\n\n议题本身保留，清完就能重新讨论。`,
           "重置", async () => {
             await fetch("/topics/reset", {
               method: "POST", headers: { "Content-Type": "application/json" },
@@ -1106,6 +1152,52 @@ function setAddMode(mode) {
   }
 }
 
+/* ⭐ 议题配图：添加/编辑弹窗里直接选图 + 预览（2026-10-20，**最多 4 张**） */
+let addImages = [];                    // /shots/xxx 或 data URL
+let addImagesChanged = false;
+const addImgList = document.getElementById("addImgList");
+const addImgPick = document.getElementById("addImgPick");
+
+function paintAddImages() {
+  addImgList.innerHTML = "";
+  addImages.forEach((src, i) => {
+    const box = document.createElement("div");
+    box.style.cssText = "position:relative;width:88px;height:66px;border-radius:8px;" +
+      "overflow:hidden;border:1px solid #34343f;background:#1c1c24";
+    const im = document.createElement("img");
+    im.src = src;
+    im.style.cssText = "width:100%;height:100%;object-fit:cover";
+    const x = document.createElement("button");
+    x.textContent = "✕";
+    x.title = "去掉这张";
+    x.style.cssText = "position:absolute;top:2px;right:2px;width:18px;height:18px;border-radius:50%;" +
+      "border:0;background:rgba(0,0,0,.72);color:#fff;font-size:11px;line-height:18px;padding:0;cursor:pointer";
+    x.onclick = () => { addImages.splice(i, 1); addImagesChanged = true; paintAddImages(); };
+    box.append(im, x);
+    addImgList.appendChild(box);
+  });
+  addImgPick.disabled = addImages.length >= 4;
+  addImgPick.textContent = addImages.length >= 4
+    ? "已满 4 张" : (addImages.length ? `🖼 再加一张（${addImages.length}/4）` : "🖼 加一张图");
+}
+addImgPick.addEventListener("click", () => {
+  if (addImages.length >= 4) return;
+  topicImgFile.value = "";
+  topicImgFile.onchange = () => {
+    const f = topicImgFile.files[0];
+    if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => {
+      if (addImages.length >= 4) return;
+      addImages.push(String(rd.result || ""));
+      addImagesChanged = true;
+      paintAddImages();
+    };
+    rd.readAsDataURL(f);
+  };
+  topicImgFile.click();
+});
+
 function showAdd() {
   setAddMode("add");
   editIndex = null;
@@ -1114,6 +1206,9 @@ function showAdd() {
   document.getElementById("addReason").value = "";
   document.getElementById("addAuthor").value = "";
   document.getElementById("addErr").textContent = "";
+  addImages = [];
+  addImagesChanged = false;
+  paintAddImages();
   addModal.classList.remove("hidden");
   setTimeout(() => document.getElementById("addTitle").focus(), 50);
 }
@@ -1129,6 +1224,9 @@ function showEdit(tp) {
   document.getElementById("addReason").value = tp.reason || "";
   document.getElementById("addAuthor").value = tp.author || "";
   document.getElementById("addErr").textContent = "";
+  addImages = (tp.images || []).slice(0, 4);   // ⭐ 编辑时把现有配图带进来（不点 ✕ 就不动它们）
+  addImagesChanged = false;
+  paintAddImages();
   addModal.classList.remove("hidden");
   setTimeout(() => document.getElementById("addTitle").focus(), 50);
 }
@@ -1148,6 +1246,15 @@ async function saveAdd() {
   });
   const j = await r.json().catch(() => ({}));
   if (j.ok) {
+    // ⭐ 配图（2026-10-20）：只有真的动过才写（编辑时没碰图就不产生无谓的写盘）
+    if (addImagesChanged) {
+      try {
+        await fetch("/topics/image", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: title, images: addImages })
+        });
+      } catch (_) { /* 图没存上也别拦着议题本身保存 */ }
+    }
     addModal.classList.add("hidden");
     showLib();                      // ⭐ 回到议题整理，能看到新加 / 刚改完的那条
   } else {
@@ -1601,12 +1708,14 @@ const setModal = document.getElementById("setModal");
 const setHint = document.getElementById("setHint");
 const setStopOnClose = document.getElementById("setStopOnClose");
 const setAutoDefault = document.getElementById("setAutoDefault");
+const setMood = document.getElementById("setMood");      // ⭐ 讨论氛围（2026-10-20）
 
 async function setLoad() {
   try {
     const j = await (await fetch("/settings")).json();
     setStopOnClose.checked = !!j.stop_when_no_viewer;
     setAutoDefault.checked = !!j.auto_next_default;
+    if (setMood) setMood.value = j.mood || "academic";   // ⭐ 讨论氛围
   } catch (e) { setHint.textContent = "读取失败"; }
   loadKeys();                       // ⭐ 顺带把各家 key 的配置状态拉一遍（只回末四位）
 }
@@ -1718,6 +1827,9 @@ setStopOnClose.onchange = () => setSave(
 setAutoDefault.onchange = () => setSave(
   { auto_next_default: setAutoDefault.checked },
   setAutoDefault.checked ? "下次开场直接自动跑" : "下次开场每轮停下等你");
+if (setMood) setMood.onchange = () => setSave(
+  { mood: setMood.value },
+  setMood.value === "casual" ? "🍵 轻松聊天（下一场生效）" : "🎓 学术研讨（下一场生效）");
 
 /* ⭐ 版本号（2026-10-12，服务端是 0.2.0）：
    `PAGE_VERSION` 由服务端渲染时替换（server.py 的 `_serve_index()`），

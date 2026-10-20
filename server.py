@@ -2436,7 +2436,7 @@ class RealTable:
                 ], max_tokens=4000)   # ⭐ 600 → 4000：阿鱼是 deepseek-flash（**推理模型**），
                                       #    思考 token 和正文共用这个预算；跟 think-budget.json 的 4000 对齐
                 if intro:
-                    say("ayu", intro)
+                    say(host["who"], intro)   # ⭐ 2026-10-20 修：以前写死 "ayu"，主持人设成谁都显示阿鱼
             except Exception as e:
                 say("system", f"（主持人开场失败：{type(e).__name__}: {str(e)[:80]}）", "system")
 
@@ -2770,7 +2770,7 @@ def summarize_debate() -> str:
         say("system", "（本场没有主持人（或主持人不可用）—— 跳过会议总结）", "system")
         return ""
 
-    say("system", "📝 阿鱼开始整理这场讨论的会议记录……", "system")
+    say("system", f"📝 {me['name']} 开始整理这场讨论的会议记录……", "system")
     try:
         text = llm_call(me["base_url"], model_for(me), me["key"], [
             {"role": "system", "content":
@@ -2798,7 +2798,8 @@ def summarize_debate() -> str:
             f.write("\n\n---\n\n# 📝 会议纪要（阿鱼整理）\n\n" + text.strip() + "\n")
     except Exception:
         pass
-    say("ayu", text.strip(), "summary")      # ⭐ kind=summary：前端渲染成大卡片
+    say(me["who"], text.strip(), "summary")      # ⭐ kind=summary：前端渲染成大卡片
+    #    （2026-10-20 修：以前写死 "ayu"，主持人换成谁，纪要卡片也还是挂阿鱼的名字）
     # ⭐ 把这份总览**回填进「余味」**：散场后的闲聊也要读得到它
     #    （阿包 2026-10-12 定的是「逐轮整理 + 最后总览」两份都喂给所有人）。
     #    ⚠️ 只有"刚聊完那一场就是这个议题"时才回填 —— 免得把旧议题的总览塞进当前的余味。

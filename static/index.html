@@ -778,6 +778,7 @@
         <button class="ghost" id="pastBack">← 返回列表</button>
         <span class="pdtitle" id="pastTitle"></span>
         <button class="ghost" id="pastMode">看完整记录</button>
+        <button class="ghost" id="pastExport" title="把这一场的完整记录下载成 .md 文件">📥 导出 .md</button>
       </div>
       <div class="pdtext" id="pastText"></div>
     </div>
@@ -1917,6 +1918,12 @@ document.getElementById("pastBack").onclick = () => {
   pastList.classList.remove("hidden");
 };
 pastModeBtn.onclick = () => { if (pastCur) pastShowDetail(pastCur, !pastIsFull); };
+// ⭐ 导出（2026-10-20）：下载这一场的完整记录（.md 原文）
+const pastExportBtn = document.getElementById("pastExport");
+if (pastExportBtn) pastExportBtn.onclick = () => {
+  if (!pastCur) return;
+  location.href = `/past?file=${encodeURIComponent(pastCur.file)}&mode=download`;
+};
 
 /* ⭐ 参会者一览：点头像 → 拖滑块调这位 AI 的「思考用量」（阿包 2026-10-11 要求）
    · 滑块像音量条一样**连续可调**（1000~16000，不设死档位）

@@ -60,7 +60,8 @@ STATIC = ROOT / "static"
 #    ① 连着跑几场**不用修** ② config / 日志头 / afterglow 这些**格式冻住**（改就得写迁移）
 #    ③ 别人 clone 下来能**一次装成** ④ 前端有最低限度的自动检查 ⑤ 待办清空
 #  ⚠️ 每次改动较大时记得抬这个号 —— 它出现在三处：界面右上角、每场日志的文件头、`GET /state`。
-VERSION = "0.3.1"        # 0.3.1（2026-10-20）：议题配图（最多 4 张，添加/编辑弹窗内置）+ 讨论氛围
+VERSION = "0.3.2"        # 0.3.2（2026-10-20）：往期讨论加「📥 导出 .md」（下载任意一场的完整记录）
+#                          0.3.1（2026-10-20）：议题配图（最多 4 张，添加/编辑弹窗内置）+ 讨论氛围
                          #   （学术研讨 / 轻松聊天）+ 重置 = 真删（战绩 + 日志，删前备份）+ 识图提醒
                          #   （选议题前就警告谁看不了图）+ 修纪要思考泄漏 / 空结果 / webp 的 MIME
 #                          0.3.0（2026-10-18）：⚙ 设置弹窗 / 👑 主持人可选 / 🤖 模型选单 / 续场换人提示 / 昵称改造
@@ -3693,6 +3694,28 @@ class Handler(SimpleHTTPRequestHandler):
                 k, _, v = kv.partition("=")
                 if k:
                     args[k] = urllib.parse.unquote(v)
+            if args.get("file") and (args.get("mode") or "") == "download":
+                # ⭐ 导出（2026-10-20 阿包要的）：直接下载这一场的 .md 原文
+                txt = read_past_debate(args["file"], "full")
+                if not txt:
+                    body = json.dumps({"ok": False, "msg": "读不到这场记录"},
+                                      ensure_ascii=False).encode("utf-8")
+                    self.send_response(404)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                data = txt.encode("utf-8")
+                # ⚠️ 文件名里有中文 —— 按 RFC 5987 编码，不然浏览器下载下来是乱码名
+                disp = "attachment; filename*=UTF-8''" + urllib.parse.quote(args["file"])
+                self.send_response(200)
+                self.send_header("Content-Type", "text/markdown; charset=utf-8")
+                self.send_header("Content-Disposition", disp)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if args.get("file"):
                 txt = read_past_debate(args["file"], args.get("mode") or "summary")
                 body = json.dumps({"ok": bool(txt), "text": txt},

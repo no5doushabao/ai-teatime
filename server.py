@@ -3200,7 +3200,7 @@ def selftest() -> int:
         check("mock 回复" in out, f"能收到回复：{out}")
         check(seen and seen[0]["model"] == "test-model", "请求带上了正确的 model")
         check(seen and seen[0]["auth"] == "Bearer sk-fake-123", "Authorization 头格式正确")
-        check(seen and seen[0]["n_msg"] == 1, "messages 数量正确")
+        check(seen and seen[0]["n_msg"] == 2, "messages 数量正确（原来 1 条，_NO_COT 会补一条 system 禁令）")
     except Exception as e:
         check(False, f"调用失败：{type(e).__name__}: {e}")
 

@@ -599,11 +599,22 @@
       <div class="setrow">
         <div class="setmain">
           <div class="setlab">你的称呼</div>
-          <div class="tip">AI 们怎么叫你（默认「你」）。改完<b>下一场</b>生效 ——
-            以前它写死叫「阿包」，别人下载后改了名也没用。</div>
+          <div class="tip">AI 们怎么叫你（默认「你」）。改完<b>下一场</b>生效。</div>
         </div>
         <input id="setOwner" placeholder="你" autocomplete="off" maxlength="16"
                style="width:130px;padding:6px 9px;border-radius:8px;border:1px solid #34343f;background:#1c1c24;color:#e8e8f0">
+      </div>
+      <div class="setrow">
+        <div class="setmain">
+          <div class="setlab">你的头像</div>
+          <div class="tip">旁听席上你发言时显示的小图。没设就是默认那个杯子。<b>立即生效</b>。</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <img id="setMyAvatar" src="/avatars/boss.png" alt=""
+               style="width:40px;height:40px;border-radius:50%;object-fit:cover;border:2px solid #34343f;background:#24242e">
+          <button class="ghost" id="setPickAvatar">换一张</button>
+          <input type="file" id="setAvatarFile" accept="image/*" style="display:none">
+        </div>
       </div>
       <div class="setrow">
         <div class="setmain">
@@ -1455,15 +1466,22 @@ document.getElementById("askNo").onclick = () => askModal.classList.add("hidden"
 /* ── 消息渲染 ── */
 const LONG = 260;        // ⭐ 超过这个字数就折叠，免得一场讨论刷出几千行
 
+function mdLite(html) {
+  // ⭐ 2026-10-25：模型爱输出 **粗体**，以前原样显示成 **文字**，截图很难看。
+  //    只做最小处理：**xx** → <strong>xx</strong>。
+  //    传进来的 html 已经过 linkify 的 esc() 转义，所以这里替换是安全的。
+  return String(html || "").replace(/\*\*([^*\n]{1,200})\*\*/g, "<strong>$1</strong>");
+}
+
 function addBubbleText(el, text) {
   const keep = el.querySelector("img.shot");     // ⭐ 图不能被 innerHTML 冲掉（展开/收起要塞回来）
-  const full = linkify(text);                    // ⭐ 转义 + 链接化：链接在外面直接能点开
+  const full = mdLite(linkify(text));            // ⭐ 转义 + 链接化 + 粗体：链接在外面直接能点开
   if ((text || "").length <= LONG) {
     el.innerHTML = full;                         // ⚠️ 这里安全：full 已经过 esc() 转义
     if (keep) el.appendChild(keep);
     return;
   }
-  const short = linkify((text || "").slice(0, LONG));
+  const short = mdLite(linkify((text || "").slice(0, LONG)));
   el.innerHTML = short + "…";
   const btn = document.createElement("span");
   btn.className = "more";
@@ -1495,7 +1513,7 @@ function addMsg(m) {
   if (m.kind === "summary") {
     const d = document.createElement("div");
     d.className = "summary";
-    d.innerHTML = `<div class="sh">📝 会议纪要 · 阿鱼整理</div>${esc(m.text)}`;
+    d.innerHTML = `<div class="sh">📝 会议纪要 · 阿鱼整理</div>${mdLite(esc(m.text))}`;
     flow.appendChild(d);
     flow.scrollTop = flow.scrollHeight;
     return;
@@ -1505,7 +1523,7 @@ function addMsg(m) {
     const d = document.createElement("div");
     d.className = "notes";
     const parts = m.text.split("\n");
-    d.innerHTML = `<div class="nh">${esc(parts[0])}</div>${esc(parts.slice(1).join("\n"))}`;
+    d.innerHTML = `<div class="nh">${esc(parts[0])}</div>${mdLite(esc(parts.slice(1).join("\n")))}`;
     flow.appendChild(d);
     flow.scrollTop = flow.scrollHeight;
     return;
@@ -1859,6 +1877,37 @@ if (setMood) setMood.onchange = () => setSave(
 if (setOwner) setOwner.onchange = () => setSave(
   { owner_name: setOwner.value.trim() || "你" },
   "称呼改好了（下一场生效）");
+
+  /* ⭐ 你的头像（2026-10-25 阿包要的）：旁听席原来只有个默认杯子，换不了。
+     复用「参会者一览」那套 compressAvatar（256×256 居中裁）+ /avatar（who="boss"）。 */
+  const setMyAvatar = document.getElementById("setMyAvatar");
+  const setPickAvatar = document.getElementById("setPickAvatar");
+  const setAvatarFile = document.getElementById("setAvatarFile");
+  if (setPickAvatar && setAvatarFile) {
+    setPickAvatar.onclick = () => setAvatarFile.click();
+    setAvatarFile.onchange = async () => {
+      const f = setAvatarFile.files[0];
+      setAvatarFile.value = "";                  // 清掉，免得同一张图选不回来
+      if (!f) return;
+      setHint.textContent = "处理图片…";
+      let data;
+      try { data = await compressAvatar(f); }
+      catch (e) { setHint.textContent = "换头像失败：" + e.message; return; }
+      try {
+        const r = await (await fetch("/avatar", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ who: "boss", data: data })
+        })).json();
+        if (!r.ok) { setHint.textContent = "换头像失败：" + (r.error || "未知原因"); return; }
+        // ⭐ 加时间戳：不然浏览器还拿缓存里那张旧的
+        const url = "/avatars/boss.png?t=" + Date.now();
+        setMyAvatar.src = url;
+        document.querySelectorAll('img.av[src*="/avatars/boss.png"]')
+          .forEach(im => { im.src = url; });
+        setHint.textContent = "头像换好了";
+      } catch (e) { setHint.textContent = "换头像失败：" + e.message; }
+    };
+  }
 
 /* ⭐ 检查更新（2026-10-20）：查 GitHub 有没有新版本，有就说怎么更新（git pull，不用重下） */
 const setCheckUpdate = document.getElementById("setCheckUpdate");

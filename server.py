@@ -60,7 +60,17 @@ STATIC = ROOT / "static"
 #    ① 连着跑几场**不用修** ② config / 日志头 / afterglow 这些**格式冻住**（改就得写迁移）
 #    ③ 别人 clone 下来能**一次装成** ④ 前端有最低限度的自动检查 ⑤ 待办清空
 #  ⚠️ 每次改动较大时记得抬这个号 —— 它出现在三处：界面右上角、每场日志的文件头、`GET /state`。
-VERSION = "0.3.5"        # 0.3.5（2026-10-25）：你的头像可以换（设置里）；聊天里的 **粗体** 正常渲染了
+VERSION = "0.3.6"        # 0.3.6（2026-10-30）：⭐⭐ **日志回放** —— 把任意一场讨论还原成界面
+                         #   （「往期讨论」点「▶ 回放到界面」/ 把 .md 拖进页面 / `?replay=<文件名>`），
+                         #   默认铺开成"那场结束时的样子"，也能按节奏逐条播放 + 纯净模式，给录视频用。
+                         #   同一份日志不重复导入（去重）；导入只写 logs/，**不碰战绩**。
+                         #   ⭐ 同时修两个插话老 bug：
+                         #   ① **插话轮吃掉起点轮转** → 每次插话都从名单第一位重来（阿包 10-18 确认、
+                         #      今天才真动手：shift/order 提到插话分支之前 + 分支改 for g in order）
+                         #   ② **一次连插几句只喂最后一句** → 前面的被 clear() 一起丢掉，嘉宾只看到「」
+                         #      （新增 _inbox_merge 合并全队列；纯图无字时补占位文案）
+                         #   顺带补：插话轮也跳过已下场的嘉宾、也查预算（阿包说这两条要，第三条不要）
+#                          0.3.5（2026-10-25）：你的头像可以换（设置里）；聊天里的 **粗体** 正常渲染了
 #                          0.3.3（2026-10-20）：加「你的称呼」（owner_name）—— 以前全站写死「阿包」，
                          #   别人下载后怎么改名都没用（阿包的朋友实测反馈）；设置弹窗里能改，下一场生效
 #                          0.3.2（2026-10-20）：往期讨论加「📥 导出 .md」
@@ -869,6 +879,28 @@ def _inbox_item(x) -> dict:
     return {"text": str(x or ""), "image": ""}
 
 
+def _inbox_merge(pending) -> dict:
+    """把这一轮攒下的**全部**插话合并成一条 → `{"text":…, "shots": [图片 url…]}`。
+
+    ⚠️ 2026-10-30 修（阿包报的）：原来三处消费点都写 `_inbox_item(pending[-1])`，
+       而紧跟着 `_boss_inbox.clear()` 会把**整个队列**清掉 ——
+       于是「一次连续插话只剩最后一条进上下文，前面的永久丢失」。
+       他当场撞上：先发一段文字＋图、紧接着又补一张图 → 最后那条是纯图 →
+       嘉宾只看到「（阿包介入讨论：「」＋一张图）」，只好自己编"他大概想问什么"；
+       小千甚至把那个空引号解读成了"一张递到桌上的空白回执"。
+       （同一天另修的：插话轮不吃起点轮转，见 `_run_inner`。）
+
+    纯图无字时补一句占位文案 —— 让嘉宾知道**他确实没写字**，而不是以为被吞了。
+    """
+    items = [_inbox_item(x) for x in pending]
+    texts = [it["text"].strip() for it in items if it["text"].strip()]
+    shots = [it["image"] for it in items if it["image"]]
+    text = "\n".join(texts)
+    if not text and shots:
+        text = "（阿包只发了图，没写字）"
+    return {"text": text, "shots": shots[:4]}
+
+
 # ⭐ 看图能力：三态判断（2026-10-20 阿包提的「选到不识图的模型要提醒」）
 #
 #   为什么不能只分"能 / 不能"：实测下来有三种情况，混成两态就会说错话。
@@ -1624,6 +1656,157 @@ def read_past_debate(fname: str, mode: str = "summary") -> str:
                 "阿鱼问「要我帮你整理吗」时选「需要」才会生成。\n"
                 "先切到「看完整记录」能看到原始过程。）")
     return txt
+
+
+# ── ⭐ 回放：把一份日志 .md 还原成"那一场"的界面（2026-10-30 阿包要的，为了录视频）──
+#    思路：日志里每条都是 `- **HH:MM 名字**：正文`，而 `say()` 推给前端的就是
+#    {who,name,org,text,ts,round,kind,image} —— 解析成同一个形状，前端 `addMsg()` 直接就能画，
+#    渲染层一行都不用重写。
+#    ⚠️ 只认茶话会自己的日志格式；外部记录先转换再导入。
+
+_LOG_HEAD_RE = re.compile(r"^- \*\*(\d{2}:\d{2}) ([^*\n]+?)\*\*：(.*)$", re.M)
+_LOG_SUM_RE = re.compile(r"^#\s*📝\s*会议纪要（阿鱼整理）\s*$", re.M)
+_LOG_IMG_RE = re.compile(r"^[ \t]*!\[[^\]]*\]\((/shots/[^)]+)\)[ \t]*$", re.M)
+
+
+def display_to_who(name: str) -> str:
+    """日志里写的显示名（阿鱼 / 小千大小姐 / 阿包）→ 内部 id（ayu / qwen / boss）。"""
+    n = (name or "").strip()
+    if not n:
+        return ""
+    if n in (_OWNER, "阿包", "你"):
+        return "boss"
+    for w, nm, _org in GUESTS:
+        if n in (w, nm):
+            return w
+    return _NAME_ALIAS.get(n.lower(), "")      # 老日志里写过的"千问 / 通义"等别名
+
+
+def parse_log_md(txt: str) -> dict:
+    """把 `logs/*.md` 解析成 `{"meta": …, "messages": […]}`。
+
+    ⚠️ **绝不抛异常**：认不出的行并进上一条正文 —— 半截日志 / 空壳日志也得能回放。
+    ⚠️ 会议纪要那一大段单独切出来，做成最后那张 `kind=summary` 的大卡片。
+    """
+    meta = {"topic": "", "started": "", "version": "", "rounds": 0, "speakers": []}
+    m = re.search(r"^- 议题：(.+)$", txt, re.M)
+    if m:
+        meta["topic"] = m.group(1).strip()
+    m = re.search(r"^- 开始：(.+)$", txt, re.M)
+    if m:
+        meta["started"] = m.group(1).strip()
+    m = re.search(r"^- 版本：(.+)$", txt, re.M)
+    if m:
+        meta["version"] = m.group(1).strip()
+
+    # ① 先切出"会议纪要"（它不是讨论过程，是最后的大卡片）
+    body, summary = txt, ""
+    ms = _LOG_SUM_RE.search(txt)
+    if ms:
+        body, summary = txt[:ms.start()], txt[ms.end():].strip()
+
+    # ② 逐条切：每条从 `- **HH:MM 名字**：` 开始，到下一个这样的行之前
+    hits = list(_LOG_HEAD_RE.finditer(body))
+    messages, cur_round = [], 0
+    for i, h in enumerate(hits):
+        end = hits[i + 1].start() if i + 1 < len(hits) else len(body)
+        ts, raw_name = h.group(1), h.group(2).strip()
+        text = (h.group(3) + body[h.end():end]).strip()
+
+        # 图片：日志里是独立的 `![图](/shots/xxx.jpg)` 行
+        imgs = _LOG_IMG_RE.findall(text)
+        if imgs:
+            text = _LOG_IMG_RE.sub("", text).strip()
+
+        who = "system" if raw_name == "system" else display_to_who(raw_name)
+        kind = "chat"
+        if who == "system":
+            mr = re.match(r"^—— 第 (\d+) 轮 ——$", text)
+            if mr:
+                cur_round = int(mr.group(1))
+                kind = "round"
+                meta["rounds"] = max(meta["rounds"], cur_round)
+            else:
+                kind = "system"
+        # 显示名 / 小字（跟 say() 里一条一条对得上；guest 认不出来就照日志原文显示）
+        if who == "boss":
+            disp, org = _OWNER, "旁听席"
+        elif who == "system":
+            disp, org = "", ""
+        else:
+            disp, org = next(((nm, o) for w, nm, o in GUESTS if w == who), (raw_name, ""))
+            if disp not in meta["speakers"]:
+                meta["speakers"].append(disp)
+
+        messages.append({
+            "who": who or raw_name, "name": disp, "org": org,
+            "text": text, "ts": ts, "round": cur_round,
+            "kind": kind, "image": imgs[0] if imgs else "",
+        })
+
+    if summary:
+        messages.append({"who": "system", "name": "", "org": "",
+                         "text": summary, "ts": "", "round": cur_round,
+                         "kind": "summary", "image": ""})
+    return {"meta": meta, "messages": messages}
+
+
+def import_log_md(name: str, txt: str) -> dict:
+    """把一份日志 .md 收进 `logs/`（回放用）。返回 `{"ok":…, "file":…, "meta":…}`。
+
+    ⚠️ 文件名规范化成茶话会自己的 `YYYYMMDD-HHMMSS-议题.md`（往期列表靠它认时间 / 题目）。
+       `- 开始：` 有就用它，没有就用当前时间。
+    ⚠️ **只写 logs/，绝不碰 `debate-history.json`** —— 导入的东西不是"我跑过的一场"，
+       不能污染议题库里「已讨论 N 轮」的战绩。
+    """
+    parsed = parse_log_md(txt or "")
+    meta = parsed["meta"]
+    if not parsed["messages"]:
+        return {"ok": False, "msg": "这份文件里没认出任何发言（不是茶话会的日志？）"}
+    d = ROOT / "logs"
+    d.mkdir(exist_ok=True)
+    # 时间戳：优先用日志里写的开始时间
+    stamp = ""
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})", meta.get("started") or "")
+    if m:
+        stamp = f"{m.group(1)}{m.group(2)}{m.group(3)}-{m.group(4)}{m.group(5)}00"
+    if not stamp:
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    topic = (meta.get("topic") or Path(name or "").stem or "导入的讨论").strip()
+    # 文件名里不能有的字符（Windows）+ 别太长
+    safe = re.sub(r'[\\/:*?"<>|\r\n\t]', " ", topic).strip()[:40] or "导入的讨论"
+    p = d / f"{stamp}-{safe}.md"
+    # ⚠️ 同一份内容别反复落盘（2026-10-30 实测：阿包连着拖 4 次同一个文件 →
+    #    logs 里 4 个 162 KB 的副本，往期列表直接刷屏）。先按"时间戳+题目"找候选，
+    #    内容一致就**直接复用那一个**。
+    try:
+        want = (txt or "").strip()
+        for old in sorted(d.glob(f"{stamp}-{safe}*.md")):
+            if old.is_file() and old.read_text(encoding="utf-8", errors="replace").strip() == want:
+                return {"ok": True, "file": old.name, "meta": meta,
+                        "count": len(parsed["messages"]), "dedup": True}
+    except Exception:
+        pass
+    n = 1
+    while p.exists():                       # 不同内容才算新的一场 → 加序号，别覆盖原来的
+        n += 1
+        p = d / f"{stamp}-{safe}-{n}.md"
+    try:
+        p.write_text(txt, encoding="utf-8")
+    except Exception as e:
+        return {"ok": False, "msg": f"写不进去：{type(e).__name__}: {str(e)[:120]}"}
+    return {"ok": True, "file": p.name, "meta": meta,
+            "count": len(parsed["messages"])}
+
+
+def replay_past_debate(fname: str) -> dict:
+    """读一场日志并解析成可回放的消息。挡路径穿越（同 `read_past_debate`）。"""
+    txt = read_past_debate(fname, "full")
+    if not txt:
+        return {"ok": False, "msg": "读不到这场记录"}
+    parsed = parse_log_md(txt)
+    return {"ok": True, "file": fname, "meta": parsed["meta"],
+            "messages": parsed["messages"]}
 
 
 # ⭐ 命题人 → 桌上的人（2026-10-11 修 bug 时加的）
@@ -2532,23 +2715,57 @@ class RealTable:
             self.round_turns = []          # ⭐ 每轮清空：本轮已发言（原文按顺序攒）
             say("system", f"—— 第 {r} 轮 ——", "round")
 
+            # ⭐ 起点轮转（⚠️ 2026-10-30 提前到插话分支**之前** —— 阿包报的 bug：
+            #    "一旦用户插话，几个 AI 的回答顺序就完全定死了"。
+            #    原来 shift/order 算在插话分支后面，而插话分支用的是 `self.roster` 原序，
+            #    于是**每次插话都从名单第一位重来**、这一轮的轮转被白吃掉。
+            #    交接文件 10-18 就记下了修法（"把 shift/order 提前 + 插话分支改 for g in order"），
+            #    今天才真动手。）
+            shift = (r - 1) % len(self.roster)     # 起点轮转（按累计轮号接着往下轮）
+            order = self.roster[shift:] + self.roster[:shift]
+            if r == self.round_offset + 1:  # ⭐ 本场第一轮把命题人提到最前 —— 跟开场白点名的那位**对齐**
+                order = [first] + [g for g in order if g["who"] != first["who"]]
+
             # ⭐ 阿包插话：这一轮大家先正面回应他
             with _lock:
                 pending = list(_boss_inbox)
                 _boss_inbox.clear()
             if pending:
-                item = _inbox_item(pending[-1])       # ⭐ {"text":…, "image":…}（兼容老字符串）
+                # ⚠️ 2026-10-30 修：合并**全部**插话（原来只取 pending[-1]，
+                #    连续插话时前面几句被 clear() 一起丢掉）
+                item = _inbox_merge(pending)
                 q = item["text"].strip()
-                shot = item["image"]
-                say("system", f"（阿包介入讨论：「{q[:40]}」{'　＋一张图' if shot else ''}）", "system")
-                for g in self.roster:
+                shots = item["shots"]
+                n_say = q.count("\n") + 1
+                first_line = (q.splitlines()[0] if q else "")[:40]
+                more = f"等 {n_say} 段" if n_say > 1 else ""
+                pics = f"　＋{len(shots)} 张图" if shots else ""
+                say("system", f"（阿包介入讨论：「{first_line}」{more}{pics}）", "system")
+                for g in order:
+                    # ⭐ 已经被"请下场"的，本场不再请他 —— 插话轮原来漏了这条检查
+                    if self.sidelined.get(g["who"], 0) >= 2:
+                        continue
+                    if self.over_budget:
+                        say("system", "💸 触到预算上限，先散会 —— 想继续就把 budget_cny 调大", "system")
+                        self._hist_progress(r - 1 - self.round_offset, finished=True)
+                        return
                     time.sleep(random.uniform(*s["gap"]))
                     try:
-                        t = self.ask(g, f"阿包（旁听的人类）插了一句：「{q}」—— 请在你的发言里正面回应他。",
-                                     images=([shot] if shot else None))
+                        t = self.ask(g, f"阿包（旁听的人类）插话了：「{q}」—— 请在你的发言里正面回应他。",
+                                     images=(shots or None))
                     except Exception as e:
-                        say("system", f"（{g['name']} 掉线了：{type(e).__name__}）", "system")
+                        say("system", f"（{g['name']} 掉线了：{type(e).__name__}: {str(e)[:80]}）", "system")
+                        # ⭐ 和主流程一样：永久错误当场请下场，临时的连败两轮才请
+                        hard = isinstance(e, urllib.error.HTTPError) and e.code in (400, 401, 403, 404)
+                        n = 2 if hard else self.sidelined.get(g["who"], 0) + 1
+                        self.sidelined[g["who"]] = n
+                        if n >= 2:
+                            why = "的配置有问题（key / 参数）" if hard else "连续失败，多半是被限流"
+                            say("system",
+                                f"（⚠️ {g['name']} {why} —— 本场先不请他了，"
+                                f"剩下的轮次不再等他、也不白等退避）", "system")
                         continue
+                    self.sidelined[g["who"]] = 0        # ⭐ 成功一次就清零
                     say(g["who"], t)
                     self._record(g, r, t)
                 self._write_notes(r)
@@ -2557,11 +2774,6 @@ class RealTable:
                 if not self._pause_between_rounds(r):
                     return
                 continue
-
-            shift = (r - 1) % len(self.roster)     # 起点轮转（按累计轮号接着往下轮）
-            order = self.roster[shift:] + self.roster[:shift]
-            if r == self.round_offset + 1:  # ⭐ 本场第一轮把命题人提到最前 —— 跟开场白点名的那位**对齐**
-                order = [first] + [g for g in order if g["who"] != first["who"]]
             for g in order:
                 # ⭐ 已经被"请下场"的，本场不再请他 —— 否则每轮都要白等三次退避
                 #    （阿包那场就是：Gemini 掉线后每轮还在傻等 70 秒，一路等到散场）
@@ -2662,7 +2874,7 @@ def demo_loop() -> None:
             pending = list(_boss_inbox)
             _boss_inbox.clear()
         if pending:
-            q = _inbox_item(pending[-1])["text"][:24]
+            q = _inbox_merge(pending)["text"].replace("\n", "／")[:24]
             say("system", f"（回应阿包：「{q}」）", "system")
             for who in order:
                 time.sleep(random.uniform(1.0, 2.0))
@@ -3272,11 +3484,13 @@ def idle_loop(roster: list, settings: dict) -> None:
             _boss_inbox.clear()
         if not pending:
             continue
-        item = _inbox_item(pending[-1])          # ⭐ {"text":…, "image":…}（兼容老字符串）
+        item = _inbox_merge(pending)
         q = item["text"].strip()
-        shot = item["image"]
-        say("system", f"（回应阿包：「{q[:24]}」{'　＋一张图' if shot else ''}）", "system")
-        shot_data = image_data_url(shot) if shot else ""
+        shots = item["shots"]
+        first_line = (q.splitlines()[0] if q else "")[:24]
+        pics = f"　＋{len(shots)} 张图" if shots else ""
+        say("system", f"（回应阿包：「{first_line}」{pics}）", "system")
+        shot_datas = [d for d in (image_data_url(x) for x in shots) if d][:4]
         # ⭐ 阿包这句也进"刚才的闲聊"—— 后面的人要能看见前面的人回了什么
         note_idle_talk("阿包", q or "（一张图）")
         # ⭐ 用最新的在场名单（休息的那位就不接话了）；名单也一并喂给模型当"身份锚"
@@ -3285,10 +3499,10 @@ def idle_loop(roster: list, settings: dict) -> None:
         for g in ready_now:
             try:
                 base = q or "（阿包发来一张图，想听你说说）"
-                if shot and guest_vision(g) and shot_data:
-                    content = [{"type": "text", "text": base},
-                               {"type": "image_url", "image_url": {"url": shot_data}}]
-                elif shot:
+                if shot_datas and guest_vision(g):
+                    content = ([{"type": "text", "text": base}] +
+                               [{"type": "image_url", "image_url": {"url": d}} for d in shot_datas])
+                elif shots:
                     content = base + ("\n\n【阿包发来一张图】⚠️ 你看不到图片内容 —— 别猜图里有什么，"
                                       "就基于文字回应；可以直说「我看不到图，但…」。")
                 else:
@@ -3884,6 +4098,21 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.startswith("/replay"):        # ⭐ 回放（2026-10-30）：把一场日志还原成界面消息
+            q = self.path.split("?", 1)[1] if "?" in self.path else ""
+            args = {}
+            for kv in q.split("&"):
+                k, _, v = kv.partition("=")
+                if k:
+                    args[k] = urllib.parse.unquote(v)
+            res = replay_past_debate(args.get("file") or "")
+            body = json.dumps(res, ensure_ascii=False).encode("utf-8")
+            self.send_response(200 if res.get("ok") else 404)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/update-check":           # ⭐ 检查更新（2026-10-20 阿包要的）
             body = json.dumps(check_update(), ensure_ascii=False).encode("utf-8")
             self.send_response(200)
@@ -4002,6 +4231,20 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         global _chosen_topic_index, _rounds_override, _auto_next, _auto_next_default, _stop_when_no_viewer, _host_who
+        if self.path == "/import":                  # ⭐ 导入一份日志 .md 进来（回放 / 录视频用）
+            n = int(self.headers.get("Content-Length", 0))
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                payload = {}
+            res = import_log_md(str(payload.get("name") or ""), str(payload.get("text") or ""))
+            body = json.dumps(res, ensure_ascii=False).encode("utf-8")
+            self.send_response(200 if res.get("ok") else 400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/ask_guest":               # ⭐ 现场提问：让某位在座的 AI 提议题备选
             n = int(self.headers.get("Content-Length", 0))
             try:

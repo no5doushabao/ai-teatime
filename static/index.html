@@ -47,6 +47,39 @@
   #topicBar .tl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #topicBar .mini { flex: 0 0 auto; white-space: nowrap; }   /* ⭐ 按钮变长了也别被压扁/换行 */
 
+  /* ── ⭐ 回放条（2026-10-30 阿包要的：把一场日志还原成界面，录视频用）── */
+  #replayBar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 7px 14px; font-size: 12px; color: #ffd8a8;
+    background: #2e2418; border-bottom: 1px solid #4a3a22;
+  }
+  #replayBar .rbTitle { flex: 1; min-width: 160px; overflow: hidden;
+                        text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  #replayBar .rbPos { color: #c9a878; font-variant-numeric: tabular-nums; }
+  #replayBar .mini { flex: 0 0 auto; white-space: nowrap;
+                     background: #3a2e1e; border-color: #5a4530; color: #ffd8a8; }
+  #replayBar .mini:hover { background: #4a3a26; }
+  #replayBar .mini.on { background: #6b4f2a; border-color: #a07a45; color: #fff3e0; }
+  #replayBar select {
+    padding: 3px 6px; font-size: 11.5px; border-radius: 8px; cursor: pointer;
+    background: #3a2e1e; color: #ffd8a8; border: 1px solid #5a4530;
+  }
+  /* ⭐ 纯净模式：录屏时只留对话（回放条留着，不然退不出来） */
+  body.pure header, body.pure #topicBar, body.pure footer { display: none !important; }
+  /* ⭐ 拖 .md 进来时给个提示框 */
+  #dropHint {
+    position: fixed; inset: 0; z-index: 200; pointer-events: none;
+    border: 3px dashed #ffd8a8; background: rgba(46,36,24,.55);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; color: #ffe9c9; font-weight: 600;
+  }
+
+  .pitem .rbtn { margin-left: 8px; padding: 2px 9px; }
+
+  /* ⚠️ `#replayBar` / `#dropHint` 自带 `display:flex`，而通用 `.hidden` 是类选择器 ——
+     id 优先级更高，不加这两条它们**藏不住**（2026-10-30 截图当场看出来的）。 */
+  #replayBar.hidden, #dropHint.hidden { display: none !important; }
+
   /* ── 消息流 ── */
   #flow { flex: 1; overflow-y: auto; padding: 16px 16px 6px; scroll-behavior: smooth; }
   #flow::-webkit-scrollbar { width: 8px; }
@@ -487,7 +520,25 @@
   <button class="mini" id="changeTopic">🍵 开场 / 换议题</button>
 </div>
 
+<!-- ⭐ 回放条（2026-10-30）：把一场日志还原成界面 —— 拖 .md 进来，或从「📜 往期讨论」点回放 -->
+<div id="replayBar" class="hidden">
+  <span class="rbTitle" id="rbTitle">📖 回放</span>
+  <span class="rbPos" id="rbPos">0 / 0</span>
+  <button id="rbPlay" class="mini" title="从头逐条播放（像真的在讨论）">▶ 播放</button>
+  <select id="rbSpeed" title="播放速度">
+    <option value="4">4× 快</option>
+    <option value="2" selected>2×</option>
+    <option value="1">1× 正常</option>
+    <option value="0.5">0.5× 慢</option>
+  </select>
+  <button id="rbAll" class="mini" title="一次性全部铺开（截图 / 立刻看结尾用）">⏩ 全部展开</button>
+  <button id="rbRestart" class="mini" title="清空重放">⏮ 重来</button>
+  <button id="rbPure" class="mini" title="藏掉顶栏和底栏，只留对话（录屏用）">🎬 纯净模式</button>
+  <button id="rbExit" class="mini" title="回到实时界面（会刷新一次）">✕ 退出回放</button>
+</div>
+
 <div id="flow"></div>
+<div id="dropHint" class="hidden">把 .md 日志拖到这里 → 直接回放成界面</div>
 
 <footer>
   <div class="seat">
@@ -1607,9 +1658,153 @@ function addMsg(m) {
   }
 }
 
-const es = new EventSource("/stream");
-es.onmessage = e => { try { addMsg(JSON.parse(e.data)); } catch (_) {} };
-es.onerror = () => { badge.textContent = "连接断开…"; };
+/* ⚠️ `replaying` 必须在下面 `es.onmessage` **之前**声明 —— let 在声明前引用会 TDZ 抛错，
+   而 /stream 连上就可能立刻推消息，不能指望"回调晚于声明执行"。 */
+let replaying = false;
+
+/* ⭐ `?nolive=1` = 不连实时流（回放/录屏/无头截图用）。
+   ⚠️ 有它页面才"加载得完" —— SSE 是长连接，headless 截图会永远等下去（今天踩过）。 */
+const NO_LIVE = (() => { try { return new URLSearchParams(location.search).has("nolive"); } catch (_) { return false; } })();
+
+const es = NO_LIVE ? null : new EventSource("/stream");
+if (es) {
+  es.onmessage = e => { if (replaying) return; try { addMsg(JSON.parse(e.data)); } catch (_) {} };
+  es.onerror = () => { badge.textContent = "连接断开…"; };
+}
+
+/* ⭐ 回放（2026-10-30 阿包要的）：把一场日志还原成"讨论结束时的样子" —— 也给录视频用。
+   两种看法：① 默认「全部展开」= 立刻看到那场结束的样子 ② 「▶ 播放」= 按节奏逐条出现（像真的在讨论）
+   ⚠️ 回放期间 `replaying` 一立起来，SSE 推来的实时消息就**全部不理** —— 不然屏幕会被当前场冲掉。 */
+const replayBar = document.getElementById("replayBar");
+const rbTitle = document.getElementById("rbTitle");
+const rbPos = document.getElementById("rbPos");
+const rbPlay = document.getElementById("rbPlay");
+const rbSpeed = document.getElementById("rbSpeed");
+const rbAll = document.getElementById("rbAll");
+const rbRestart = document.getElementById("rbRestart");
+const rbPure = document.getElementById("rbPure");
+const rbExit = document.getElementById("rbExit");
+const dropHint = document.getElementById("dropHint");
+
+let replayMsgs = [];
+let replayIdx = 0;
+let replayTimer = null;
+let replayPlaying = false;
+
+function replayStopTimer() {
+  if (replayTimer) { clearTimeout(replayTimer); replayTimer = null; }
+  replayPlaying = false;
+  rbPlay.textContent = "▶ 播放";
+  rbPlay.classList.remove("on");
+}
+
+function replayClearFlow() {
+  replayStopTimer();
+  flow.innerHTML = "";
+  lastSeq = 0;
+  lastRound = 0;
+  replayIdx = 0;
+  rbPos.textContent = `0 / ${replayMsgs.length}`;
+}
+
+/* 一次性铺开 = "那场刚结束时的样子" */
+function replayPaintAll() {
+  replayClearFlow();
+  replayMsgs.forEach(m => addMsg(m));
+  replayIdx = replayMsgs.length;
+  rbPos.textContent = `${replayIdx} / ${replayMsgs.length}`;
+  flow.scrollTop = flow.scrollHeight;
+}
+
+/* 逐条播放：每条给的时间按字数算（长发言要留够看的时间），再除以速度倍率 */
+function replayStep() {
+  if (!replayPlaying) return;
+  if (replayIdx >= replayMsgs.length) { replayStopTimer(); return; }
+  const m = replayMsgs[replayIdx++];
+  addMsg(m);
+  rbPos.textContent = `${replayIdx} / ${replayMsgs.length}`;
+  if (replayIdx >= replayMsgs.length) { replayStopTimer(); return; }
+  const chars = (m.text || "").length;
+  const base = m.kind === "chat" ? Math.min(6000, 500 + chars * 3) : 700;
+  const sp = parseFloat(rbSpeed.value) || 2;
+  replayTimer = setTimeout(replayStep, Math.max(150, Math.round(base / sp)));
+}
+
+function replayFromStart() {
+  replayClearFlow();
+  replayPlaying = true;
+  rbPlay.textContent = "⏸ 暂停";
+  rbPlay.classList.add("on");
+  flow.scrollTop = 0;
+  replayStep();
+}
+
+async function replayStart(file) {
+  let j;
+  try {
+    j = await (await fetch("/replay?file=" + encodeURIComponent(file))).json();
+  } catch (e) {
+    alert("读取失败：" + e); return;
+  }
+  if (!j.ok) { alert("读不到这场：" + (j.msg || file)); return; }
+  replaying = true;
+  replayMsgs = j.messages || [];
+  const meta = j.meta || {};
+  rbTitle.textContent = "📖 " + (meta.topic || file);
+  rbTitle.title = `${meta.started || ""} · ${meta.rounds || 0} 轮 · ${file}`;
+  // ⭐ 回放时把会挡视线的弹窗都收起来（议题框是启动就弹的）
+  document.querySelectorAll(".modal").forEach(el => el.classList.add("hidden"));
+  replayBar.classList.remove("hidden");
+  replayPaintAll();                       // 默认先给"结束时的样子"
+}
+
+/* 拖一份 .md 进来 → 收进 logs/ → 直接回放 */
+async function importAndReplay(file) {
+  try {
+    const text = await file.text();
+    const j = await (await fetch("/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: file.name, text })
+    })).json();
+    if (!j.ok) { alert("导入失败：" + (j.msg || "未知原因")); return; }
+    await replayStart(j.file);
+  } catch (e) {
+    alert("导入失败：" + e);
+  }
+}
+
+rbPlay.onclick = () => {
+  if (!replaying) return;
+  if (replayPlaying) { replayStopTimer(); return; }        // 暂停（位置保留）
+  if (replayIdx >= replayMsgs.length) return replayFromStart();   // 放完了 → 重来
+  replayPlaying = true;                                    // 从当前位置继续
+  rbPlay.textContent = "⏸ 暂停";
+  rbPlay.classList.add("on");
+  replayStep();
+};
+rbRestart.onclick = () => { if (replaying) replayFromStart(); };
+rbAll.onclick = () => { if (replaying) replayPaintAll(); };
+rbPure.onclick = () => {
+  const on = document.body.classList.toggle("pure");
+  rbPure.classList.toggle("on", on);
+  rbPure.textContent = on ? "🎬 纯净模式（开）" : "🎬 纯净模式";
+  flow.scrollTop = flow.scrollHeight;
+};
+rbExit.onclick = () => {
+  replayStopTimer();
+  replaying = false;
+  document.body.classList.remove("pure");
+  location.reload();                    // 回到实时界面（最省事、不会留下半截状态）
+};
+
+/* ⭐ 带参数直接回放：`/?replay=<日志文件名>` —— 收藏/分享某一场，测试也走这条路 */
+(function () {
+  try {
+    const f = new URLSearchParams(location.search).get("replay");
+    if (f) setTimeout(() => replayStart(f), 400);
+  } catch (_) {}
+})();
 
 /* ── 旁听席发言 ── */
 async function send() {
@@ -1718,10 +1913,21 @@ document.getElementById("msg").addEventListener("paste", (e) => {
   }
 });
 
-window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  // ⭐ 拖文件进来时给个提示（2026-10-30）
+  const t = e.dataTransfer && e.dataTransfer.types;
+  if (t && Array.from(t).includes("Files")) dropHint.classList.remove("hidden");
+});
+window.addEventListener("dragleave", (e) => { if (!e.relatedTarget) dropHint.classList.add("hidden"); });
 window.addEventListener("drop", (e) => {
+  dropHint.classList.add("hidden");
   const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-  if (f) { e.preventDefault(); takeImage(f); }
+  if (!f) return;
+  e.preventDefault();
+  // ⭐ .md = 导入一场讨论并回放（2026-10-30）；别的文件照旧当图片处理
+  if (/\.md$/i.test(f.name)) { importAndReplay(f); return; }
+  takeImage(f);
 });
 
 /* ⭐ 「⚡ 自动」：**默认手动** —— 每轮阿鱼总结完就停下，等点「▶ 开始下一轮」；
@@ -2001,8 +2207,15 @@ async function openPast() {
         `（${esc(it.speakers.join("、"))}） · ` +
         (it.has_summary ? `<span class="psum">有会议纪要</span>`
                         : `<span class="pno">没整理纪要</span>`) +
+        `<button class="mini rbtn" title="把这一场还原成界面（点「▶ 播放」逐条出现，适合录视频）">▶ 回放到界面</button>` +
         `</div>`;
       el.onclick = () => pastShowDetail(it, false);
+      const rb = el.querySelector(".rbtn");
+      if (rb) rb.onclick = (ev) => {
+        ev.stopPropagation();                // 别顺带打开"看纪要"
+        pastModal.classList.add("hidden");   // 先关弹窗，不然盖在回放上看不见
+        replayStart(it.file);
+      };
       pastList.appendChild(el);
     });
   } catch (e) {
